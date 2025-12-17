@@ -1,0 +1,37 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Pipeline {
+  id        String        @id @default(cuid())
+  name      String
+  definition Json
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+  runs      PipelineRun[]
+}
+
+model PipelineRun {
+  id         String           @id @default(cuid())
+  pipeline   Pipeline         @relation(fields: [pipelineId], references: [id])
+  pipelineId String
+  status     String
+  createdAt  DateTime         @default(now())
+  updatedAt  DateTime         @updatedAt
+  logs       PipelineRunLog[]
+}
+
+model PipelineRunLog {
+  id        String       @id @default(cuid())
+  run       PipelineRun  @relation(fields: [runId], references: [id])
+  runId     String
+  timestamp DateTime     @default(now())
+  message   String
+}
+
+
