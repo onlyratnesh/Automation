@@ -1,46 +1,35 @@
-import { NextResponse } from "next/server";
-import { prisma } from "@/lib/prisma";
 
-export const runtime = "nodejs";
+import { NextRequest, NextResponse } from "next/server";
+import { PipelineService } from "@/services/pipelines";
+import { IAMError } from "@/lib/iam";
 
-// Get all pipelines
 export async function GET() {
-  const pipelines = await prisma.pipeline.findMany({
-    orderBy: { createdAt: "desc" },
-  });
-  return NextResponse.json(pipelines);
-}
-
-// Create or update a pipeline (upsert by id if provided)
-export async function POST(request: Request) {
-  const body = await request.json();
-
-  const {
-    id,
-    name,
-    definition,
-  }: { id?: string; name: string; definition: unknown } = body;
-
-  if (!name || !definition) {
-    return NextResponse.json(
-      { error: "name and definition are required" },
-      { status: 400 },
-    );
+  try {
+    const pipelines = await PipelineService.list();
+    return NextResponse.json(pipelines);
+  } catch (error: any) {
+    if (error instanceof IAMError) {
+      return NextResponse.json({ error: error.message }, { status: 403 });
+    }
+    return NextResponse.json({ error: error.message }, { status: 500 });
   }
-
-  const pipeline = await prisma.pipeline.upsert({
-    where: { id: id || "___non_existing___" },
-    update: {
-      name,
-      definition,
-    },
-    create: {
-      name,
-      definition,
-    },
-  });
-
-  return NextResponse.json(pipeline);
 }
 
+export async function POST(req: NextRequest) {
+  try {
+    const body = await req.json();
+    const { name, definition } = body;
 
+    if (!name || !definition) {
+      return NextResponse.json({ error: "Missing name or definition" }, { status: 400 });
+    }
+
+    const pipeline = await PipelineService.create(name, definition);
+    return NextResponse.json(pipeline, { status: 201 });
+  } catch (error: any) {
+    if (error instanceof IAMError) {
+      return NextResponse.json({ error: error.message }, { status: 403 });
+    }
+    return NextResponse.json({ error: error.message }, { status: 500 });
+  }
+}

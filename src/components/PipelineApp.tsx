@@ -26,6 +26,7 @@ import {
   Redo,
   GripHorizontal,
   Loader2,
+  Minus,
 } from "lucide-react";
 
 // --- STYLING CONSTANTS ---
@@ -226,6 +227,7 @@ export default function PipelineApp() {
   // --- STATE ---
   const [pipelines, setPipelines] = useState<Pipeline[]>(INITIAL_PIPELINES);
   const [activePipelineId, setActivePipelineId] = useState<string>("p1");
+  const [, setBackendLoaded] = useState(false);
 
   // Undo/Redo State
   const [history, setHistory] = useState<Pipeline[][]>([]);
@@ -247,7 +249,13 @@ export default function PipelineApp() {
   const [showPipelineSettings, setShowPipelineSettings] = useState(false);
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
 
+  // Canvas State
+  const [viewport, setViewport] = useState({ x: 0, y: 0, zoom: 1 });
+  const [isPanning, setIsPanning] = useState(false);
+  const [lastMousePos, setLastMousePos] = useState({ x: 0, y: 0 });
+
   const [dragState, setDragState] = useState<DragState | null>(null);
+
   const [connectingState, setConnectingState] =
     useState<ConnectingState | null>(null);
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
@@ -278,6 +286,51 @@ export default function PipelineApp() {
       `[SERVER ${new Date().toLocaleTimeString()}] ${msg}`,
       ...prev,
     ]);
+
+  // --- BACKEND: FETCH ON MOUNT ---
+  useEffect(() => {
+    const fetchPipelines = async () => {
+      try {
+        const res = await fetch("/api/pipelines");
+        if (res.status === 403) {
+          addServerLog("⚠️ Unauthorized: Please login.");
+          return;
+        }
+        if (!res.ok) throw new Error("Failed to fetch");
+
+        const data = await res.json();
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const mapped = data.map((p: any) => ({
+          id: p.definition?.id || generateId(),
+          remoteId: p.id,
+          name: p.name,
+          onSuccessPipelineId: "",
+          status: "idle",
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          nodes: (p.definition?.nodes || []).map((n: any, idx: number) => ({
+            ...n,
+            x: (typeof n.x === 'number' && Number.isFinite(n.x)) ? n.x : 100 + (idx * 50),
+            y: (typeof n.y === 'number' && Number.isFinite(n.y)) ? n.y : 100 + (idx * 50),
+          })),
+          edges: p.definition?.edges || [],
+        }));
+
+        if (mapped.length > 0) {
+          setPipelines(mapped);
+          setActivePipelineId(mapped[0].id);
+          setBackendLoaded(true);
+          addServerLog(`✅ Loaded ${mapped.length} pipelines from server`);
+        } else {
+          addServerLog("ℹ️ No pipelines on server, using default.");
+        }
+      } catch (err) {
+        console.error(err);
+        addServerLog("❌ Failed to load pipelines from server");
+      }
+    };
+    fetchPipelines();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // --- HISTORY MANAGEMENT ---
   const addToHistory = useCallback(() => {
@@ -337,10 +390,10 @@ export default function PipelineApp() {
         p.id !== activePipelineId
           ? p
           : {
-              ...p,
-              nodes: nodeUpdater ? nodeUpdater(p.nodes) : p.nodes,
-              edges: edgeUpdater ? edgeUpdater(p.edges) : p.edges,
-            },
+            ...p,
+            nodes: nodeUpdater ? nodeUpdater(p.nodes) : p.nodes,
+            edges: edgeUpdater ? edgeUpdater(p.edges) : p.edges,
+          },
       ),
     );
   };
@@ -358,9 +411,8 @@ export default function PipelineApp() {
         type,
         x: position.x,
         y: position.y,
-        label: `New ${
-          type === "stage" ? "Stage" : type === "subflow" ? "Sub-Pipeline" : type
-        }`,
+        label: `New ${type === "stage" ? "Stage" : type === "subflow" ? "Sub-Pipeline" : type
+          }`,
         tasks: [],
         targetPipelineId: "",
         status: "pending",
@@ -541,13 +593,18 @@ export default function PipelineApp() {
   const saveActivePipelineToServer = useCallback(async () => {
     if (!activePipeline) return;
     try {
-      const response = await fetch("/api/pipelines", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
+      let url = "/api/pipelines";
+      let method = "POST";
+
+      if (activePipeline.remoteId) {
+        url = `/api/pipelines/${activePipeline.remoteId}`;
+        method = "PUT";
+      }
+
+      const response = await fetch(url, {
+        method: method,
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          id: activePipeline.remoteId,
           name: activePipeline.name,
           definition: {
             id: activePipeline.id,
@@ -566,11 +623,14 @@ export default function PipelineApp() {
 
       const saved = (await response.json()) as { id: string; name: string };
 
-      setPipelines((prev) =>
-        prev.map((p) =>
-          p.id === activePipeline.id ? { ...p, remoteId: saved.id } : p,
-        ),
-      );
+      if (!activePipeline.remoteId) {
+        setPipelines((prev) =>
+          prev.map((p) =>
+            p.id === activePipeline.id ? { ...p, remoteId: saved.id } : p,
+          ),
+        );
+      }
+
       addServerLog("✅ Pipeline saved to server");
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
@@ -599,14 +659,11 @@ export default function PipelineApp() {
 
           setServerRunStatus(data.status === "queued" ? "running" : data.status);
 
-          // Replace server log section based on latest backend logs
           const newServerLogs = [...data.logs]
-            .sort((a, b) => (a.id > b.id ? 1 : -1))
             .map((l) => `[SERVER LOG] ${l.message}`)
             .reverse();
 
           setLogs((prev) => {
-            // Keep non-server logs and prepend new server logs
             const filtered = prev.filter((line) => !line.startsWith("[SERVER LOG]"));
             return [...newServerLogs, ...filtered];
           });
@@ -639,24 +696,48 @@ export default function PipelineApp() {
 
     try {
       // Ensure it is saved and has a remote id
-      if (!activePipeline.remoteId) {
-        await saveActivePipelineToServer();
+      let remoteId = activePipeline.remoteId;
+      if (!remoteId) {
+        // Auto-save logic
+        addServerLog("💾 Auto-saving before run...");
+        const saveRes = await fetch("/api/pipelines", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: activePipeline.name,
+            definition: {
+              id: activePipeline.id,
+              name: activePipeline.name,
+              nodes: activePipeline.nodes,
+              edges: activePipeline.edges,
+            },
+          }),
+        });
+        if (saveRes.ok) {
+          const saved = await saveRes.json();
+          remoteId = saved.id;
+          setPipelines((prev) =>
+            prev.map((p) => p.id === activePipeline.id ? { ...p, remoteId: saved.id } : p)
+          );
+        } else {
+          throw new Error("Failed to auto-save");
+        }
       }
 
+      // Re-find in case state changed
       const refreshed = pipelines.find((p) => p.id === activePipeline.id);
-      if (!refreshed?.remoteId) {
+      const targetId = remoteId || refreshed?.remoteId;
+
+      if (!targetId) {
         addServerLog("❌ Cannot run on server: pipeline not saved.");
         return;
       }
 
       addServerLog("🚀 Sending run request to server...");
 
-      const res = await fetch("/api/run-pipeline", {
+      const res = await fetch(`/api/pipelines/${targetId}/run`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ pipelineId: refreshed.remoteId }),
+        headers: { "Content-Type": "application/json" },
       });
 
       if (!res.ok) {
@@ -665,9 +746,9 @@ export default function PipelineApp() {
         return;
       }
 
-      const payload = (await res.json()) as { runId: string };
-      addServerLog(`✅ Server run started (runId=${payload.runId})`);
-      void pollServerRunLogs(payload.runId);
+      const payload = (await res.json()) as { id: string }; // Notice: API returns { id: string, ... } for run
+      addServerLog(`✅ Server run started (runId=${payload.id})`);
+      void pollServerRunLogs(payload.id);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       addServerLog(`❌ Error starting server run: ${message}`);
@@ -677,7 +758,6 @@ export default function PipelineApp() {
     addServerLog,
     pipelines,
     pollServerRunLogs,
-    saveActivePipelineToServer,
   ]);
 
   // --- DRAG & DROP ---
@@ -708,12 +788,12 @@ export default function PipelineApp() {
       const bounds = canvasRef.current?.getBoundingClientRect();
       if (!bounds) return;
 
-      const x = event.clientX - bounds.left - NODE_WIDTH / 2;
-      const y = event.clientY - bounds.top - NODE_HEIGHT / 2;
+      const x = (event.clientX - bounds.left - viewport.x) / viewport.zoom - NODE_WIDTH / 2;
+      const y = (event.clientY - bounds.top - viewport.y) / viewport.zoom - NODE_HEIGHT / 2;
 
       if (type === "atomic-task") {
-        const mouseX = event.clientX - bounds.left;
-        const mouseY = event.clientY - bounds.top;
+        const mouseX = (event.clientX - bounds.left - viewport.x) / viewport.zoom;
+        const mouseY = (event.clientY - bounds.top - viewport.y) / viewport.zoom;
 
         const hitNode = currentNodes.find(
           (node) =>
@@ -747,8 +827,11 @@ export default function PipelineApp() {
     if (!dragState) return;
 
     const handleWindowMove = (e: MouseEvent) => {
-      const dx = e.clientX - dragState.startX;
-      const dy = e.clientY - dragState.startY;
+      // Calculate delta in screen space, but apply to node in world space
+      // Since we just add delta to node position, we need to divide by zoom
+      const dx = (e.clientX - dragState.startX) / viewport.zoom;
+      const dy = (e.clientY - dragState.startY) / viewport.zoom;
+
       const newX = dragState.initialNodeX + dx;
       const newY = dragState.initialNodeY + dy;
       updateNodeRef.current(dragState.id, { x: newX, y: newY });
@@ -763,7 +846,7 @@ export default function PipelineApp() {
       window.removeEventListener("mousemove", handleWindowMove);
       window.removeEventListener("mouseup", handleWindowUp);
     };
-  }, [dragState]);
+  }, [dragState, viewport.zoom]);
 
   const handleMouseDownNode = (
     e: React.MouseEvent<HTMLDivElement>,
@@ -788,17 +871,53 @@ export default function PipelineApp() {
     });
   };
 
+  const handleMouseDownCanvas = (e: React.MouseEvent<HTMLDivElement>) => {
+    // Only pan if clicking on background (not bubble, not node)
+    // Nodes stop propagation, so we are safe assuming background here logic-wise
+    if (e.button === 0) { // Left click
+      setIsPanning(true);
+      setLastMousePos({ x: e.clientX, y: e.clientY });
+    }
+  };
+
   const handleCanvasMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (isPanning) {
+      const dx = e.clientX - lastMousePos.x;
+      const dy = e.clientY - lastMousePos.y;
+      setViewport(prev => ({ ...prev, x: prev.x + dx, y: prev.y + dy }));
+      setLastMousePos({ x: e.clientX, y: e.clientY });
+      return;
+    }
+
     if (!canvasRef.current) return;
     const rect = canvasRef.current.getBoundingClientRect();
+
+    // Calculate World Coordinates for connection line
+    const screenX = e.clientX - rect.left;
+    const screenY = e.clientY - rect.top;
+
+    // world = (screen - pan) / zoom
     setMousePos({
-      x: e.clientX - rect.left,
-      y: e.clientY - rect.top,
+      x: (screenX - viewport.x) / viewport.zoom,
+      y: (screenY - viewport.y) / viewport.zoom,
     });
   };
 
   const handleCanvasMouseUp = () => {
     setConnectingState(null);
+    setIsPanning(false);
+  };
+
+  const handleWheel = (e: React.WheelEvent<HTMLDivElement>) => {
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      const ZOOM_SPEED = 0.001;
+      const newZoom = Math.min(Math.max(0.1, viewport.zoom - e.deltaY * ZOOM_SPEED), 5);
+      setViewport(prev => ({ ...prev, zoom: newZoom }));
+    } else {
+      // Optional: pan with wheel?
+      // For now let's just use it for standard scroll if not zooming
+    }
   };
 
   const startConnection = (
@@ -862,18 +981,18 @@ export default function PipelineApp() {
         p.id !== activePipelineId
           ? p
           : {
-              ...p,
-              nodes: p.nodes.map((n) =>
-                n.id === stageId
-                  ? {
-                      ...n,
-                      tasks: n.tasks?.map((t) =>
-                        t.id === taskId ? { ...t, status } : t,
-                      ),
-                    }
-                  : n,
-              ),
-            },
+            ...p,
+            nodes: p.nodes.map((n) =>
+              n.id === stageId
+                ? {
+                  ...n,
+                  tasks: n.tasks?.map((t) =>
+                    t.id === taskId ? { ...t, status } : t,
+                  ),
+                }
+                : n,
+            ),
+          },
       ),
     );
   };
@@ -884,11 +1003,11 @@ export default function PipelineApp() {
         p.id !== activePipelineId
           ? p
           : {
-              ...p,
-              nodes: p.nodes.map((n) =>
-                n.id === nodeId ? { ...n, status } : n,
-              ),
-            },
+            ...p,
+            nodes: p.nodes.map((n) =>
+              n.id === nodeId ? { ...n, status } : n,
+            ),
+          },
       ),
     );
   };
@@ -971,8 +1090,7 @@ export default function PipelineApp() {
               (p) => p.id === node.targetPipelineId,
             );
             addLog(
-              `  🔄 Triggering Sub-Pipeline: ${
-                target ? target.name : "Unknown"
+              `  🔄 Triggering Sub-Pipeline: ${target ? target.name : "Unknown"
               }`,
             );
             // eslint-disable-next-line no-await-in-loop
@@ -1017,16 +1135,16 @@ export default function PipelineApp() {
         p.id !== activePipelineId
           ? p
           : {
-              ...p,
-              status: "running",
-              nodes: p.nodes.map((n) => ({
-                ...n,
-                status: "pending",
-                tasks: n.tasks
-                  ? n.tasks.map((t) => ({ ...t, status: "pending" }))
-                  : [],
-              })),
-            },
+            ...p,
+            status: "running",
+            nodes: p.nodes.map((n) => ({
+              ...n,
+              status: "pending",
+              tasks: n.tasks
+                ? n.tasks.map((t) => ({ ...t, status: "pending" }))
+                : [],
+            })),
+          },
       ),
     );
 
@@ -1070,11 +1188,10 @@ export default function PipelineApp() {
             <button
               onClick={undo}
               disabled={history.length === 0}
-              className={`flex items-center gap-2 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
-                history.length === 0
-                  ? "text-slate-300"
-                  : "text-slate-600 hover:bg-slate-100"
-              }`}
+              className={`flex items-center gap-2 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${history.length === 0
+                ? "text-slate-300"
+                : "text-slate-600 hover:bg-slate-100"
+                }`}
               title="Undo (Ctrl+Z)"
             >
               <Undo size={14} /> Undo
@@ -1082,11 +1199,10 @@ export default function PipelineApp() {
             <button
               onClick={redo}
               disabled={redoStack.length === 0}
-              className={`flex items-center gap-2 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
-                redoStack.length === 0
-                  ? "text-slate-300"
-                  : "text-slate-600 hover:bg-slate-100"
-              }`}
+              className={`flex items-center gap-2 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${redoStack.length === 0
+                ? "text-slate-300"
+                : "text-slate-600 hover:bg-slate-100"
+                }`}
               title="Redo (Ctrl+Y)"
             >
               <Redo size={14} /> Redo
@@ -1108,9 +1224,8 @@ export default function PipelineApp() {
                 setShowPipelineSettings(true);
                 setSelectedNodeId(null);
               }}
-              className={`flex items-center gap-2 px-3 py-1.5 hover:bg-slate-100 rounded-md text-xs font-medium transition-colors ${
-                showPipelineSettings ? "text-blue-600 bg-slate-100" : "text-slate-600"
-              }`}
+              className={`flex items-center gap-2 px-3 py-1.5 hover:bg-slate-100 rounded-md text-xs font-medium transition-colors ${showPipelineSettings ? "text-blue-600 bg-slate-100" : "text-slate-600"
+                }`}
               title="Pipeline Settings"
             >
               <Settings size={14} /> Settings
@@ -1118,11 +1233,10 @@ export default function PipelineApp() {
             <button
               onClick={runPipeline}
               disabled={pipelineStatus === "running"}
-              className={`flex items-center gap-2 px-6 py-1.5 rounded-md text-sm font-bold text-white transition-all shadow-md ml-2 ${
-                pipelineStatus === "running"
-                  ? "bg-slate-400 cursor-not-allowed"
-                  : "bg-blue-600 hover:bg-blue-700 active:scale-95"
-              }`}
+              className={`flex items-center gap-2 px-6 py-1.5 rounded-md text-sm font-bold text-white transition-all shadow-md ml-2 ${pipelineStatus === "running"
+                ? "bg-slate-400 cursor-not-allowed"
+                : "bg-blue-600 hover:bg-blue-700 active:scale-95"
+                }`}
             >
               {pipelineStatus === "running" ? (
                 <Clock size={16} className="animate-spin" />
@@ -1134,11 +1248,10 @@ export default function PipelineApp() {
             <button
               onClick={runPipelineOnServer}
               disabled={serverRunStatus === "running"}
-              className={`flex items-center gap-1 px-3 py-1.5 rounded-md text-xs font-semibold border ml-2 transition-all ${
-                serverRunStatus === "running"
-                  ? "border-amber-300 text-amber-500 bg-amber-50 cursor-wait"
-                  : "border-slate-300 text-slate-600 bg-white hover:bg-slate-100"
-              }`}
+              className={`flex items-center gap-1 px-3 py-1.5 rounded-md text-xs font-semibold border ml-2 transition-all ${serverRunStatus === "running"
+                ? "border-amber-300 text-amber-500 bg-amber-50 cursor-wait"
+                : "border-slate-300 text-slate-600 bg-white hover:bg-slate-100"
+                }`}
               title="Run this pipeline on the backend server"
             >
               <Terminal size={14} />
@@ -1157,11 +1270,10 @@ export default function PipelineApp() {
                 setSelectedNodeId(null);
                 setShowPipelineSettings(false);
               }}
-              className={`group flex items-center gap-2 px-4 py-2 rounded-t-lg border-t border-x cursor-pointer select-none text-sm transition-all min-w-[120px] max-w-[200px] ${
-                activePipelineId === p.id
-                  ? "bg-white border-slate-300 text-blue-600 font-bold relative -mb-[1px] z-10"
-                  : "bg-slate-100 border-transparent text-slate-500 hover:bg-slate-200"
-              }`}
+              className={`group flex items-center gap-2 px-4 py-2 rounded-t-lg border-t border-x cursor-pointer select-none text-sm transition-all min-w-[120px] max-w-[200px] ${activePipelineId === p.id
+                ? "bg-white border-slate-300 text-blue-600 font-bold relative -mb-[1px] z-10"
+                : "bg-slate-100 border-transparent text-slate-500 hover:bg-slate-200"
+                }`}
             >
               <Layout
                 size={14}
@@ -1174,9 +1286,8 @@ export default function PipelineApp() {
               {pipelines.length > 1 && (
                 <button
                   onClick={(e) => deletePipeline(e, p.id)}
-                  className={`p-1 rounded-full hover:bg-red-100 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity ${
-                    activePipelineId === p.id ? "opacity-100" : ""
-                  }`}
+                  className={`p-1 rounded-full hover:bg-red-100 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity ${activePipelineId === p.id ? "opacity-100" : ""
+                    }`}
                 >
                   <X size={12} />
                 </button>
@@ -1225,6 +1336,7 @@ export default function PipelineApp() {
                 <GitMerge size={16} className="text-purple-500" />{" "}
                 <span>Merge Point</span>
               </button>
+              {/* HIDDEN: Sub-Pipeline not supported by backend yet
               <button
                 draggable
                 onDragStart={(e) => onDragStart(e, "subflow")}
@@ -1233,6 +1345,7 @@ export default function PipelineApp() {
                 <Workflow size={16} className="text-indigo-500" />{" "}
                 <span>Sub-Pipeline</span>
               </button>
+              */}
 
               <div className="mt-4 pt-4 border-t border-slate-200">
                 <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3">
@@ -1260,6 +1373,8 @@ export default function PipelineApp() {
           ref={canvasRef}
           onMouseMove={handleCanvasMouseMove}
           onMouseUp={handleCanvasMouseUp}
+          onMouseDown={handleMouseDownCanvas}
+          onWheel={handleWheel}
           onDragOver={onDragOver}
           onDrop={onDrop}
         >
@@ -1268,289 +1383,316 @@ export default function PipelineApp() {
             className="absolute inset-0 pointer-events-none opacity-10"
             style={{
               backgroundImage: "radial-gradient(#475569 1px, transparent 1px)",
-              backgroundSize: "20px 20px",
+              backgroundSize: `${20 * viewport.zoom}px ${20 * viewport.zoom}px`,
+              backgroundPosition: `${viewport.x}px ${viewport.y}px`
             }}
           />
 
-          {/* SVG LAYER (EDGES) */}
-          <svg className="absolute inset-0 w-full h-full pointer-events-none">
-            <defs>
-              <marker
-                id="arrowhead"
-                markerWidth="10"
-                markerHeight="7"
-                refX="10"
-                refY="3.5"
-                orient="auto"
-              >
-                <polygon points="0 0, 10 3.5, 0 7" fill="#94a3b8" />
-              </marker>
-            </defs>
-            {currentEdges.map((edge) => {
-              const src = currentNodes.find((n) => n.id === edge.source);
-              const tgt = currentNodes.find((n) => n.id === edge.target);
-              if (!src || !tgt) return null;
+          {/* TRANSFORM WRAPPER */}
+          <div
+            style={{
+              transform: `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.zoom})`,
+              transformOrigin: '0 0',
+              width: '100%',
+              height: '100%',
+              pointerEvents: 'none' // Let events pass through to canvas container, nodes re-enable pointer-events
+            }}
+          >
 
-              const x1 = src.x + NODE_WIDTH;
-              const y1 = src.y + 50;
-              let finalY1 = y1;
+            {/* SVG LAYER (EDGES) */}
+            <svg className="absolute overflow-visible w-full h-full pointer-events-none" style={{ top: 0, left: 0 }}>
+              <defs>
+                <marker
+                  id="arrowhead"
+                  markerWidth="10"
+                  markerHeight="7"
+                  refX="10"
+                  refY="3.5"
+                  orient="auto"
+                >
+                  <polygon points="0 0, 10 3.5, 0 7" fill="#94a3b8" />
+                </marker>
+              </defs>
+              {currentEdges.map((edge) => {
+                const src = currentNodes.find((n) => n.id === edge.source);
+                const tgt = currentNodes.find((n) => n.id === edge.target);
+                if (!src || !tgt) return null;
 
-              if (src.type === "condition") {
-                if (edge.type === "true") finalY1 = src.y + 35;
-                if (edge.type === "false") finalY1 = src.y + 105;
-              }
+                const x1 = src.x + NODE_WIDTH;
+                const y1 = src.y + 50;
+                let finalY1 = y1;
 
-              const x2 = tgt.x;
-              const y2 = tgt.y + 50;
+                if (src.type === "condition") {
+                  if (edge.type === "true") finalY1 = src.y + 35;
+                  if (edge.type === "false") finalY1 = src.y + 105;
+                }
 
-              const isSourceActive =
-                src.status === "completed" || src.status === "running";
-              const edgeColor =
-                edge.type === "true"
-                  ? "#10b981"
-                  : edge.type === "false"
-                  ? "#ef4444"
-                  : "#94a3b8";
-              const edgeWidth = isSourceActive ? 3 : 2;
+                const x2 = tgt.x;
+                const y2 = tgt.y + 50;
 
-              return (
-                <g key={edge.id}>
-                  <path
-                    d={`M ${x1} ${finalY1} C ${x1 + 80} ${finalY1}, ${
-                      x2 - 80
-                    } ${y2}, ${x2} ${y2}`}
-                    stroke={isSourceActive ? "#6366f1" : edgeColor}
-                    strokeWidth={edgeWidth}
-                    fill="none"
-                    markerEnd="url(#arrowhead)"
-                    className={
-                      isSourceActive ? "transition-colors duration-500" : ""
+                const isSourceActive =
+                  src.status === "completed" || src.status === "running";
+                const edgeColor =
+                  edge.type === "true"
+                    ? "#10b981"
+                    : edge.type === "false"
+                      ? "#ef4444"
+                      : "#94a3b8";
+                const edgeWidth = isSourceActive ? 3 : 2;
+
+                return (
+                  <g key={edge.id}>
+                    <path
+                      d={`M ${x1} ${finalY1} C ${x1 + 80} ${finalY1}, ${x2 - 80
+                        } ${y2}, ${x2} ${y2}`}
+                      stroke={isSourceActive ? "#6366f1" : edgeColor}
+                      strokeWidth={edgeWidth}
+                      fill="none"
+                      markerEnd="url(#arrowhead)"
+                      className={
+                        isSourceActive ? "transition-colors duration-500" : ""
+                      }
+                      strokeDasharray={isSourceActive ? "10,5" : ""}
+                    />
+                    {(edge.type === "true" || edge.type === "false") && (
+                      <text
+                        x={(x1 + x2) / 2}
+                        y={(finalY1 + y2) / 2 - 10}
+                        textAnchor="middle"
+                        fill={edgeColor}
+                        fontSize="10"
+                        fontWeight="bold"
+                      >
+                        {edge.type.toUpperCase()}
+                      </text>
+                    )}
+                  </g>
+                );
+              })}
+              {connectingState && (
+                <path
+                  d={(() => {
+                    const src = currentNodes.find(
+                      (n) => n.id === connectingState.sourceId,
+                    );
+                    if (!src) return "";
+                    let y = src.y + 50;
+                    if (src.type === "condition") {
+                      if (connectingState.type === "true") y = src.y + 35;
+                      if (connectingState.type === "false") y = src.y + 105;
                     }
-                    strokeDasharray={isSourceActive ? "10,5" : ""}
-                  />
-                  {(edge.type === "true" || edge.type === "false") && (
-                    <text
-                      x={(x1 + x2) / 2}
-                      y={(finalY1 + y2) / 2 - 10}
-                      textAnchor="middle"
-                      fill={edgeColor}
-                      fontSize="10"
-                      fontWeight="bold"
-                    >
-                      {edge.type.toUpperCase()}
-                    </text>
-                  )}
-                </g>
-              );
-            })}
-            {connectingState && (
-              <path
-                d={(() => {
-                  const src = currentNodes.find(
-                    (n) => n.id === connectingState.sourceId,
-                  );
-                  if (!src) return "";
-                  let y = src.y + 50;
-                  if (src.type === "condition") {
-                    if (connectingState.type === "true") y = src.y + 35;
-                    if (connectingState.type === "false") y = src.y + 105;
-                  }
-                  return `M ${src.x + NODE_WIDTH} ${y} C ${
-                    src.x + NODE_WIDTH + 80
-                  } ${y}, ${mousePos.x - 80} ${mousePos.y}, ${mousePos.x} ${
-                    mousePos.y
-                  }`;
-                })()}
-                stroke="#3b82f6"
-                strokeWidth={2}
-                strokeDasharray="5,5"
-                fill="none"
-              />
-            )}
-          </svg>
+                    return `M ${src.x + NODE_WIDTH} ${y} C ${src.x + NODE_WIDTH + 80
+                      } ${y}, ${mousePos.x - 80} ${mousePos.y}, ${mousePos.x} ${mousePos.y
+                      }`;
+                  })()}
+                  stroke="#3b82f6"
+                  strokeWidth={2}
+                  strokeDasharray="5,5"
+                  fill="none"
+                />
+              )}
+            </svg>
 
-          {/* NODE LAYER */}
-          {currentNodes.map((node) => {
-            const isSelected = selectedNodeId === node.id;
+            {/* NODE LAYER */}
+            <div className="pointer-events-auto">
+              {currentNodes.map((node) => {
+                const isSelected = selectedNodeId === node.id;
 
-            const statusStyles: Record<string, string> = {
-              pending: "border-slate-300 bg-white",
-              running:
-                "border-blue-500 ring-2 ring-blue-200 bg-white shadow-[0_0_20px_rgba(59,130,246,0.5)]",
-              completed: "border-green-500 bg-green-50",
-              skipped: "border-slate-200 bg-slate-50 opacity-60",
-            };
+                const statusStyles: Record<string, string> = {
+                  pending: "border-slate-300 bg-white",
+                  running:
+                    "border-blue-500 ring-2 ring-blue-200 bg-white shadow-[0_0_20px_rgba(59,130,246,0.5)]",
+                  completed: "border-green-500 bg-green-50",
+                  skipped: "border-slate-200 bg-slate-50 opacity-60",
+                };
 
-            const Icon =
-              node.type === "start"
-                ? Play
-                : node.type === "condition"
-                ? Split
-                : node.type === "merge"
-                ? GitMerge
-                : node.type === "stage"
-                ? Layers
-                : node.type === "subflow"
-                ? Workflow
-                : node.type === "end"
-                ? CheckCircle2
-                : Settings;
+                const Icon =
+                  node.type === "start"
+                    ? Play
+                    : node.type === "condition"
+                      ? Split
+                      : node.type === "merge"
+                        ? GitMerge
+                        : node.type === "stage"
+                          ? Layers
+                          : node.type === "subflow"
+                            ? Workflow
+                            : node.type === "end"
+                              ? CheckCircle2
+                              : Settings;
 
-            const targetName =
-              node.type === "subflow" && node.targetPipelineId
-                ? pipelines.find((p) => p.id === node.targetPipelineId)?.name
-                : null;
+                const targetName =
+                  node.type === "subflow" && node.targetPipelineId
+                    ? pipelines.find((p) => p.id === node.targetPipelineId)?.name
+                    : null;
 
-            return (
-              <div
-                key={node.id}
-                onMouseDown={(e) => handleMouseDownNode(e, node.id)}
-                className={`absolute rounded-lg shadow-md border-2 transition-all cursor-move select-none flex flex-col overflow-hidden ${
-                  statusStyles[node.status] || statusStyles.pending
-                } ${
-                  isSelected
-                    ? "ring-2 ring-blue-400 border-blue-500 z-20"
-                    : "z-10"
-                }`}
-                style={{
-                  width: NODE_WIDTH,
-                  minHeight: node.type === "stage" ? NODE_HEIGHT : 80,
-                  height: node.type === "stage" ? "auto" : NODE_HEIGHT,
-                  left: node.x,
-                  top: node.y,
-                }}
-              >
-                {node.type !== "start" && (
+                return (
                   <div
-                    className="absolute left-0 top-8 -translate-x-1/2 w-4 h-4 bg-slate-400 rounded-full border-2 border-white hover:bg-blue-500 cursor-crosshair z-20"
-                    onMouseUp={(e) => completeConnection(e, node.id)}
-                  />
-                )}
-
-                <div className="flex items-center gap-2 p-3 border-b bg-slate-50/50">
-                  <div
-                    className={`p-1.5 rounded ${
-                      node.type === "stage"
-                        ? "bg-blue-100 text-blue-600"
-                        : node.type === "subflow"
-                        ? "bg-indigo-100 text-indigo-600"
-                        : "bg-slate-200 text-slate-600"
-                    }`}
+                    key={node.id}
+                    onMouseDown={(e) => handleMouseDownNode(e, node.id)}
+                    className={`absolute rounded-lg shadow-md border-2 transition-all cursor-move select-none flex flex-col overflow-hidden ${statusStyles[node.status] || statusStyles.pending
+                      } ${isSelected
+                        ? "ring-2 ring-blue-400 border-blue-500 z-20"
+                        : "z-10"
+                      }`}
+                    style={{
+                      width: NODE_WIDTH,
+                      minHeight: node.type === "stage" ? NODE_HEIGHT : 80,
+                      height: node.type === "stage" ? "auto" : NODE_HEIGHT,
+                      left: node.x,
+                      top: node.y,
+                    }}
                   >
-                    {node.type === "stage" ? (
-                      <Layers size={14} />
-                    ) : node.type === "condition" ? (
-                      <Split size={14} />
-                    ) : node.type === "subflow" ? (
-                      <Workflow size={14} />
-                    ) : (
-                      <Settings size={14} />
+                    {node.type !== "start" && (
+                      <div
+                        className="absolute left-0 top-8 -translate-x-1/2 w-4 h-4 bg-slate-400 rounded-full border-2 border-white hover:bg-blue-500 cursor-crosshair z-20"
+                        onMouseUp={(e) => completeConnection(e, node.id)}
+                      />
                     )}
-                  </div>
-                  <div className="font-bold text-sm truncate flex-1">
-                    {node.label}
-                  </div>
-                  {node.status === "completed" && (
-                    <Check size={16} className="text-green-600" />
-                  )}
-                </div>
 
-                {/* STAGE CONTENT: TASK LIST VISUALIZATION */}
-                {node.type === "stage" && (
-                  <div className="p-3 bg-white">
-                    {node.tasks && node.tasks.length > 0 ? (
-                      <div className="space-y-2">
-                        {node.tasks.map((task, idx) => (
-                          <div
-                            key={task.id}
-                            className={`flex items-center gap-2 text-xs p-1.5 rounded border ${
-                              task.status === "running"
-                                ? "bg-blue-50 border-blue-200"
-                                : task.status === "completed"
-                                ? "bg-green-50 border-green-200"
-                                : "border-slate-100"
-                            }`}
-                          >
-                            <div className="w-4 h-4 flex items-center justify-center">
-                              {task.status === "running" ? (
-                                <Loader2
-                                  size={12}
-                                  className="animate-spin text-blue-500"
-                                />
-                              ) : task.status === "completed" ? (
-                                <Check
-                                  size={12}
-                                  className="text-green-600"
-                                />
-                              ) : (
-                                <span className="text-slate-400 font-mono">
-                                  {idx + 1}
+                    <div className="flex items-center gap-2 p-3 border-b bg-slate-50/50">
+                      <div
+                        className={`p-1.5 rounded ${node.type === "stage"
+                          ? "bg-blue-100 text-blue-600"
+                          : node.type === "subflow"
+                            ? "bg-indigo-100 text-indigo-600"
+                            : "bg-slate-200 text-slate-600"
+                          }`}
+                      >
+                        {node.type === "stage" ? (
+                          <Layers size={14} />
+                        ) : node.type === "condition" ? (
+                          <Split size={14} />
+                        ) : node.type === "subflow" ? (
+                          <Workflow size={14} />
+                        ) : (
+                          <Settings size={14} />
+                        )}
+                      </div>
+                      <div className="font-bold text-sm truncate flex-1">
+                        {node.label}
+                      </div>
+                      {node.status === "completed" && (
+                        <Check size={16} className="text-green-600" />
+                      )}
+                    </div>
+
+                    {/* STAGE CONTENT: TASK LIST VISUALIZATION */}
+                    {node.type === "stage" && (
+                      <div className="p-3 bg-white">
+                        {node.tasks && node.tasks.length > 0 ? (
+                          <div className="space-y-2">
+                            {node.tasks.map((task, idx) => (
+                              <div
+                                key={task.id}
+                                className={`flex items-center gap-2 text-xs p-1.5 rounded border ${task.status === "running"
+                                  ? "bg-blue-50 border-blue-200"
+                                  : task.status === "completed"
+                                    ? "bg-green-50 border-green-200"
+                                    : "border-slate-100"
+                                  }`}
+                              >
+                                <div className="w-4 h-4 flex items-center justify-center">
+                                  {task.status === "running" ? (
+                                    <Loader2
+                                      size={12}
+                                      className="animate-spin text-blue-500"
+                                    />
+                                  ) : task.status === "completed" ? (
+                                    <Check
+                                      size={12}
+                                      className="text-green-600"
+                                    />
+                                  ) : (
+                                    <span className="text-slate-400 font-mono">
+                                      {idx + 1}
+                                    </span>
+                                  )}
+                                </div>
+                                <span
+                                  className={`truncate flex-1 ${task.status === "completed"
+                                    ? "text-green-700"
+                                    : "text-slate-700"
+                                    }`}
+                                >
+                                  {task.name}
                                 </span>
-                              )}
-                            </div>
-                            <span
-                              className={`truncate flex-1 ${
-                                task.status === "completed"
-                                  ? "text-green-700"
-                                  : "text-slate-700"
-                              }`}
-                            >
-                              {task.name}
-                            </span>
+                              </div>
+                            ))}
                           </div>
-                        ))}
-                      </div>
-                    ) : (
-                      <div className="text-center text-[10px] text-slate-400 py-2 border border-dashed rounded">
-                        Drop Tasks Here
+                        ) : (
+                          <div className="text-center text-[10px] text-slate-400 py-2 border border-dashed rounded">
+                            Drop Tasks Here
+                          </div>
+                        )}
                       </div>
                     )}
-                  </div>
-                )}
 
-                {/* SUBFLOW CONTENT */}
-                {node.type === "subflow" && (
-                  <div className="p-4 text-center">
-                    <div className="text-[10px] font-bold text-indigo-600 bg-indigo-50 px-2 py-1 rounded border border-indigo-100 truncate">
-                      Link: {targetName || "Select Pipeline"}
-                    </div>
-                  </div>
-                )}
+                    {/* SUBFLOW CONTENT */}
+                    {node.type === "subflow" && (
+                      <div className="p-4 text-center">
+                        <div className="text-[10px] font-bold text-indigo-600 bg-indigo-50 px-2 py-1 rounded border border-indigo-100 truncate">
+                          Link: {targetName || "Select Pipeline"}
+                        </div>
+                      </div>
+                    )}
 
-                {/* CONDITION CONTENT */}
-                {node.type === "condition" && (
-                  <div className="p-4 relative h-16">
-                    <div
-                      className="absolute right-0 top-1/4 translate-x-1/2 w-4 h-4 bg-green-400 rounded-full border-2 border-white hover:scale-125 cursor-crosshair z-20"
-                      title="True"
-                      onMouseDown={(e) => startConnection(e, node.id, "true")}
-                    />
-                    <div
-                      className="absolute right-0 top-3/4 translate-x-1/2 w-4 h-4 bg-red-400 rounded-full border-2 border-white hover:scale-125 cursor-crosshair z-20"
-                      title="False"
-                      onMouseDown={(e) => startConnection(e, node.id, "false")}
-                    />
-                    <div className="text-xs text-center text-slate-500 mt-1">
-                      Evaluate Rule
-                    </div>
-                  </div>
-                )}
+                    {/* CONDITION CONTENT */}
+                    {node.type === "condition" && (
+                      <div className="p-4 relative h-16">
+                        <div
+                          className="absolute right-0 top-1/4 translate-x-1/2 w-4 h-4 bg-green-400 rounded-full border-2 border-white hover:scale-125 cursor-crosshair z-20"
+                          title="True"
+                          onMouseDown={(e) => startConnection(e, node.id, "true")}
+                        />
+                        <div
+                          className="absolute right-0 top-3/4 translate-x-1/2 w-4 h-4 bg-red-400 rounded-full border-2 border-white hover:scale-125 cursor-crosshair z-20"
+                          title="False"
+                          onMouseDown={(e) => startConnection(e, node.id, "false")}
+                        />
+                        <div className="text-xs text-center text-slate-500 mt-1">
+                          Evaluate Rule
+                        </div>
+                      </div>
+                    )}
 
-                {node.type !== "condition" && node.type !== "end" && (
-                  <div
-                    className="absolute right-0 top-8 translate-x-1/2 w-4 h-4 bg-slate-400 rounded-full border-2 border-white hover:bg-blue-500 cursor-crosshair z-20"
-                    onMouseDown={(e) => startConnection(e, node.id)}
-                  />
-                )}
-              </div>
-            );
-          })}
+                    {node.type !== "condition" && node.type !== "end" && (
+                      <div
+                        className="absolute right-0 top-8 translate-x-1/2 w-4 h-4 bg-slate-400 rounded-full border-2 border-white hover:bg-blue-500 cursor-crosshair z-20"
+                        onMouseDown={(e) => startConnection(e, node.id)}
+                      />
+                    )}
+                  </div>
+                );
+              })}
+
+            </div> {/* End Node Layer */}
+          </div> {/* End Transform Wrapper */}
+
+          {/* MOUSE POSITION INDICATOR NOT NEEDED WITH VIEW CONTROLS */}
+
+          {/* VIEW CONTROLS */}
+          <div className="absolute bottom-4 left-4 flex flex-col gap-2 bg-white/90 backdrop-blur p-2 rounded-lg shadow border z-50">
+            <button onClick={() => setViewport(v => ({ ...v, zoom: Math.min(v.zoom + 0.1, 5) }))} className="p-1 hover:bg-slate-100 rounded text-slate-600">
+              <Plus size={16} />
+            </button>
+            <button onClick={() => setViewport(v => ({ ...v, zoom: Math.max(0.1, v.zoom - 0.1) }))} className="p-1 hover:bg-slate-100 rounded text-slate-600">
+              <Minus size={16} />
+            </button>
+            <button onClick={() => setViewport({ x: 0, y: 0, zoom: 1 })} className="p-1 hover:bg-slate-100 rounded text-slate-600 text-xs font-bold" title="Reset View">
+              1:1
+            </button>
+            <div className="text-[10px] text-center text-slate-400 border-t pt-1 mt-1">
+              {Math.round(viewport.zoom * 100)}%
+            </div>
+          </div>
 
           <div className="absolute bottom-4 right-4 bg-white/80 backdrop-blur p-3 rounded-lg shadow text-xs text-slate-500 pointer-events-none select-none border">
             <div className="font-bold mb-1">Controls</div>
+            <div>• Drag Background to Pan</div>
+            <div>• Ctrl + Scroll to Zoom</div>
             <div>• Drag Stages to build Pipeline</div>
             <div>• Drag Atomic Tasks ONTO a Stage</div>
-            <div>• Click Stage to manage Tasks</div>
           </div>
         </div>
 
@@ -1562,8 +1704,8 @@ export default function PipelineApp() {
                 {selectedNode
                   ? "Stage Manager"
                   : showPipelineSettings
-                  ? "Pipeline Settings"
-                  : "Properties"}
+                    ? "Pipeline Settings"
+                    : "Properties"}
               </h2>
               <button
                 onClick={() => {
@@ -1610,12 +1752,12 @@ export default function PipelineApp() {
                       <div className="space-y-3">
                         {(!selectedNode.tasks ||
                           selectedNode.tasks.length === 0) && (
-                          <div className="text-center p-6 border-2 border-dashed border-slate-200 rounded-lg text-xs text-slate-400 bg-slate-50">
-                            Stage is empty.
-                            <br />
-                            Add a task or drag one here.
-                          </div>
-                        )}
+                            <div className="text-center p-6 border-2 border-dashed border-slate-200 rounded-lg text-xs text-slate-400 bg-slate-50">
+                              Stage is empty.
+                              <br />
+                              Add a task or drag one here.
+                            </div>
+                          )}
 
                         {selectedNode.tasks &&
                           selectedNode.tasks.map((task, idx) => (
@@ -1632,11 +1774,10 @@ export default function PipelineApp() {
                               onDrop={(e) =>
                                 handleTaskDrop(e, idx, selectedNode.id)
                               }
-                              className={`border rounded-lg bg-white shadow-sm text-xs relative group transition-all ${
-                                draggedTaskIndex === idx
-                                  ? "opacity-50 ring-2 ring-blue-400"
-                                  : "hover:border-blue-300"
-                              }`}
+                              className={`border rounded-lg bg-white shadow-sm text-xs relative group transition-all ${draggedTaskIndex === idx
+                                ? "opacity-50 ring-2 ring-blue-400"
+                                : "hover:border-blue-300"
+                                }`}
                             >
                               {/* Task Header / Handle */}
                               <div className="flex items-center gap-2 p-2 bg-slate-50 rounded-t-lg border-b border-slate-100 cursor-move">
@@ -1830,9 +1971,8 @@ export default function PipelineApp() {
 
       {/* LOGS PANEL */}
       <div
-        className={`border-t bg-slate-900 text-slate-300 flex flex-col transition-all duration-300 z-30 ${
-          logsMinimized ? "h-9" : "h-48"
-        }`}
+        className={`border-t bg-slate-900 text-slate-300 flex flex-col transition-all duration-300 z-30 ${logsMinimized ? "h-9" : "h-48"
+          }`}
       >
         <div
           onClick={() => setLogsMinimized(!logsMinimized)}
