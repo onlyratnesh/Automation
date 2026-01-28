@@ -44,12 +44,123 @@ interface ExecNode {
     type: string;
     label: string;
     tasks?: { id: string; name: string; command: string }[];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    config?: any;
 }
 
 interface ExecEdge {
     source: string;
     target: string;
-    type: 'default' | 'true' | 'false';
+    type: 'default' | 'true' | 'false' | 'case-a' | 'case-b' | 'case-c' | 'case-d';
+}
+
+// --- LOGIC HELPERS ---
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+
+function evaluateCondition(config: any): boolean {
+    if (!config || !config.variable) return Math.random() > 0.5;
+
+    // MOCK CONTEXT: In production, pass real context here
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const context: any = {
+        'step1.status': 'success',
+        'api.response': 200,
+        'user.role': 'admin',
+        'user.is_active': true,
+        'user.tags': ['vip', 'early-adopter'],
+        'order.amount': 1500,
+        'created_at': new Date().toISOString(), // Today
+    };
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const actual = context[config.variable] !== undefined ? context[config.variable] : config.variable;
+    const expected = config.value;
+    const op = config.operator;
+    const type = config.valueType || 'string';
+
+    try {
+        switch (type) {
+            case 'string': {
+                const sActual = String(actual);
+                const sExpected = String(expected);
+                switch (op) {
+                    case 'equals': return sActual === sExpected;
+                    case 'not_equals': return sActual !== sExpected;
+                    case 'contains': return sActual.includes(sExpected);
+                    case 'not_contains': return !sActual.includes(sExpected);
+                    case 'starts_with': return sActual.startsWith(sExpected);
+                    case 'ends_with': return sActual.endsWith(sExpected);
+                    case 'matches_regex': return new RegExp(sExpected).test(sActual);
+                    case 'is_empty': return sActual === '' || sActual === 'undefined' || sActual === 'null';
+                    case 'is_not_empty': return sActual !== '' && sActual !== 'undefined' && sActual !== 'null';
+                    default: return sActual == sExpected;
+                }
+            }
+            case 'number': {
+                const nActual = Number(actual);
+                const nExpected = Number(expected);
+                switch (op) {
+                    case 'eq': return nActual === nExpected;
+                    case 'neq': return nActual !== nExpected;
+                    case 'gt': return nActual > nExpected;
+                    case 'lt': return nActual < nExpected;
+                    case 'gte': return nActual >= nExpected;
+                    case 'lte': return nActual <= nExpected;
+                    case 'is_empty': return isNaN(nActual);
+                    // 'between' usage assumes expected is "min,max"
+                    case 'between': {
+                        const [min, max] = String(expected).split(',').map(Number);
+                        return nActual >= min && nActual <= max;
+                    }
+                    default: return nActual === nExpected;
+                }
+            }
+            case 'boolean': {
+                const bActual = Boolean(actual);
+                switch (op) {
+                    case 'is_true': return bActual === true;
+                    case 'is_false': return bActual === false;
+                    case 'exists': return actual !== undefined && actual !== null;
+                    case 'not_exists': return actual === undefined || actual === null;
+                    default: return bActual;
+                }
+            }
+            case 'date': {
+                const dActual = new Date(actual).getTime();
+                const dExpected = new Date(expected).getTime();
+                switch (op) {
+                    case 'after': return dActual > dExpected;
+                    case 'before': return dActual < dExpected;
+                    // 'between' assumes expected="date1,date2"
+                    case 'between': {
+                        const [d1, d2] = String(expected).split(',').map(d => new Date(d.trim()).getTime());
+                        return dActual >= d1 && dActual <= d2;
+                    }
+                    case 'last_x_days': {
+                        const days = Number(expected);
+                        const diffTime = Math.abs(Date.now() - dActual);
+                        const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+                        return diffDays <= days;
+                    }
+                    default: return dActual === dExpected;
+                }
+            }
+            case 'array': {
+                const arr = Array.isArray(actual) ? actual : [actual];
+                switch (op) {
+                    case 'contains': return arr.includes(expected);
+                    case 'not_contains': return !arr.includes(expected);
+                    case 'length_gt': return arr.length > Number(expected);
+                    case 'is_empty': return arr.length === 0;
+                    default: return false;
+                }
+            }
+            default: return actual == expected;
+        }
+    } catch (e) {
+        console.error("Condition Error", e);
+        return false;
+    }
 }
 
 // Main pipeline execution logic (Graph Engine)
@@ -98,7 +209,7 @@ async function executePipeline(job: Job<PipelineJobData>) {
             await appendLog(runId, `🔹 Processing: [${node.type}] ${node.label}`);
 
             // 3. Execution Logic per Type
-            let outcome: 'default' | 'true' | 'false' = 'default';
+            let outcome: 'default' | 'true' | 'false' | 'case-a' | 'case-b' | 'case-c' | 'case-d' = 'default';
 
             if (node.type === 'stage') {
                 if (node.tasks && node.tasks.length > 0) {
@@ -120,11 +231,41 @@ async function executePipeline(job: Job<PipelineJobData>) {
                 } else {
                     await appendLog(runId, "  (Empty Stage)");
                 }
+
+
+                // ... inside executePipeline ...
+
             } else if (node.type === 'condition') {
-                // Simulate Condition (Random for now)
-                const isTrue = Math.random() > 0.5;
+                const isTrue = evaluateCondition(node['config']);
                 outcome = isTrue ? 'true' : 'false';
-                await appendLog(runId, `  🔀 Condition evaluated to: ${outcome.toUpperCase()}`);
+                await appendLog(runId, `  🔀 Condition [${node['config']?.variable} ${node['config']?.operator} ${node['config']?.value}] -> ${outcome.toUpperCase()}`);
+
+            } else if (node.type === 'switch') {
+                const variable = node['config']?.variable || 'default';
+                // Mock context again
+                const context: any = { 'event.type': 'A' };
+                const value = context[variable] || variable;
+
+                // Simple mapping: if value matches 'A', 'B', 'C', 'D'
+                if (String(value).toLowerCase() === 'a') outcome = 'case-a';
+                else if (String(value).toLowerCase() === 'b') outcome = 'case-b';
+                else if (String(value).toLowerCase() === 'c') outcome = 'case-c';
+                else if (String(value).toLowerCase() === 'd') outcome = 'case-d';
+                else outcome = 'default';
+
+                await appendLog(runId, `  🔀 Switch [${variable}] = '${value}' -> Path: ${outcome}`);
+
+            } else if (node.type === 'script') {
+                await appendLog(runId, `  💻 Executing Script...`);
+                try {
+                    // VERY UNSAFE IN PRODUCTION - Use VM2 or generic-sandbox
+                    const code = node['config']?.code || '';
+                    const func = new Function('context', code);
+                    const result = func({ status: 'ok' }); // Pass context
+                    if (result) await appendLog(runId, `    Scripts returned: ${JSON.stringify(result)}`);
+                } catch (e: any) {
+                    await appendLog(runId, `    ❌ Script Error: ${e.message}`);
+                }
             } else if (node.type === 'subflow') {
                 await appendLog(runId, "  (Sub-Pipeline not implemented yet)");
             }

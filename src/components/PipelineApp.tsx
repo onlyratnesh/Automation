@@ -33,18 +33,63 @@ import {
 const NODE_WIDTH = 260;
 const NODE_HEIGHT = 150;
 
+const OPERATORS_BY_TYPE = {
+  string: [
+    { value: "equals", label: "Equals" },
+    { value: "not_equals", label: "Not Equals" },
+    { value: "contains", label: "Contains" },
+    { value: "not_contains", label: "Does Not Contain" },
+    { value: "starts_with", label: "Starts With" },
+    { value: "ends_with", label: "Ends With" },
+    { value: "matches_regex", label: "Matches Regex" },
+    { value: "is_empty", label: "Is Empty" },
+    { value: "is_not_empty", label: "Is Not Empty" },
+  ],
+  number: [
+    { value: "eq", label: "Equals (=)" },
+    { value: "neq", label: "Not Equals (!=)" },
+    { value: "gt", label: "Greater Than (>)" },
+    { value: "lt", label: "Less Than (<)" },
+    { value: "gte", label: "Greater/Equal (>=)" },
+    { value: "lte", label: "Less/Equal (<=)" },
+    { value: "between", label: "Is Between" },
+    { value: "is_empty", label: "Is Empty" },
+  ],
+  boolean: [
+    { value: "is_true", label: "Is True" },
+    { value: "is_false", label: "Is False" },
+    { value: "exists", label: "Exists" },
+    { value: "not_exists", label: "Does Not Exist" },
+  ],
+  date: [
+    { value: "after", label: "After Date" },
+    { value: "before", label: "Before Date" },
+    { value: "between", label: "Between Dates" },
+    { value: "last_x_days", label: "In Last X Days" },
+  ],
+  array: [
+    { value: "contains", label: "Contains Item" },
+    { value: "not_contains", label: "Does Not Contain" },
+    { value: "length_gt", label: "Length > X" },
+    { value: "is_empty", label: "Is Empty" },
+  ],
+};
+
 // --- TYPES ---
 type NodeStatus = "pending" | "running" | "completed" | "skipped";
-type NodeType = "start" | "condition" | "merge" | "stage" | "subflow" | "end";
-type EdgeType = "default" | "true" | "false";
+type NodeType = "start" | "condition" | "merge" | "stage" | "subflow" | "end" | "switch" | "script";
+type EdgeType = "default" | "true" | "false" | "case-a" | "case-b" | "case-c" | "case-d";
 type DragKind = NodeType | "atomic-task";
 
 interface Task {
   id: string;
   name: string;
-  command: string;
-  assignee: string;
+  type: 'shell' | 'http' | 'human'; // Action type
+  command?: string; // Legacy support (auto-migrated to shell)
   status: NodeStatus;
+  assignee?: string;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  params?: any; // Flexible params for HTTP/Human (url, headers, instructions)
 }
 
 interface PipelineNode {
@@ -56,6 +101,8 @@ interface PipelineNode {
   status: NodeStatus;
   tasks?: Task[];
   targetPipelineId?: string; // For subflow
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  config?: any; // To store Condition/Switch/Script logic
 }
 
 interface PipelineEdge {
@@ -111,6 +158,7 @@ const INITIAL_PIPELINES: Pipeline[] = [
           {
             id: "t1",
             name: "Checkout Code",
+            type: "shell",
             command: "git pull origin main",
             assignee: "System",
             status: "pending",
@@ -118,6 +166,7 @@ const INITIAL_PIPELINES: Pipeline[] = [
           {
             id: "t2",
             name: "Install Dependencies",
+            type: "shell",
             command: "npm install",
             assignee: "System",
             status: "pending",
@@ -125,6 +174,7 @@ const INITIAL_PIPELINES: Pipeline[] = [
           {
             id: "t3",
             name: "Run Unit Tests",
+            type: "shell",
             command: "npm test",
             assignee: "DevOps Bot",
             status: "pending",
@@ -142,6 +192,7 @@ const INITIAL_PIPELINES: Pipeline[] = [
           {
             id: "t1",
             name: "SAST Scan",
+            type: "shell",
             command: "run-sast",
             assignee: "SecOps",
             status: "pending",
@@ -159,6 +210,7 @@ const INITIAL_PIPELINES: Pipeline[] = [
           {
             id: "t1",
             name: "Deploy to Staging",
+            type: "shell",
             command: "helm upgrade staging",
             assignee: "DevOps",
             status: "pending",
@@ -166,6 +218,7 @@ const INITIAL_PIPELINES: Pipeline[] = [
           {
             id: "t2",
             name: "Run Cypress",
+            type: "shell",
             command: "npm run e2e",
             assignee: "QA Lead",
             status: "pending",
@@ -191,6 +244,7 @@ const INITIAL_PIPELINES: Pipeline[] = [
           {
             id: "t1",
             name: "Manual Approval",
+            type: "human",
             command: "wait-for-approval",
             assignee: "Manager",
             status: "pending",
@@ -198,6 +252,7 @@ const INITIAL_PIPELINES: Pipeline[] = [
           {
             id: "t2",
             name: "Promote Image",
+            type: "shell",
             command: "docker push prod",
             assignee: "System",
             status: "pending",
@@ -205,6 +260,7 @@ const INITIAL_PIPELINES: Pipeline[] = [
           {
             id: "t3",
             name: "Apply K8s",
+            type: "shell",
             command: "kubectl apply -f prod.yaml",
             assignee: "Admin",
             status: "pending",
@@ -221,6 +277,34 @@ const INITIAL_PIPELINES: Pipeline[] = [
     ],
   },
 ];
+
+// --- HELPERS ---
+
+const getSmartEdgePath = (x1: number, y1: number, x2: number, y2: number) => {
+  const dist = Math.abs(x2 - x1);
+
+  // 1. Normal Case: Target is to the right
+  if (x2 > x1 + 50) {
+    const cp1X = x1 + dist * 0.5;
+    const cp2X = x2 - dist * 0.5;
+    return `M ${x1} ${y1} C ${cp1X} ${y1}, ${cp2X} ${y2}, ${x2} ${y2}`;
+  }
+
+  // 2. Backward/Close Case: Loops around
+  const curvature = Math.max(dist * 0.5, 100);
+  const cp1X = x1 + curvature;
+  const cp2X = x2 - curvature;
+
+  // If vertically close, force a bigger loop
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const midY = (y1 + y2) / 2;
+
+  if (Math.abs(y1 - y2) < 50) {
+    return `M ${x1} ${y1} C ${x1 + 150} ${y1}, ${x2 - 150} ${y2}, ${x2} ${y2}`;
+  }
+
+  return `M ${x1} ${y1} C ${x1 + 100} ${y1}, ${x2 - 100} ${y2}, ${x2} ${y2}`;
+};
 
 // --- MAIN COMPONENT ---
 export default function PipelineApp() {
@@ -458,6 +542,7 @@ export default function PipelineApp() {
     const newTask: Task = {
       id: generateId(),
       name: "New Task",
+      type: "shell",
       command: "",
       assignee: "",
       status: "pending",
@@ -470,7 +555,7 @@ export default function PipelineApp() {
     stageId: string,
     taskId: string,
     field: keyof Task,
-    value: string,
+    value: any,
   ) => {
     const stage = currentNodes.find((n) => n.id === stageId);
     if (!stage || !stage.tasks) return;
@@ -776,6 +861,40 @@ export default function PipelineApp() {
     },
     [],
   );
+
+  const handleStageDrop = useCallback(
+    (event: React.DragEvent<HTMLDivElement>, stageId: string) => {
+      event.preventDefault();
+      event.stopPropagation();
+
+      const type = event.dataTransfer.getData("application/reactflow");
+      const taskType = event.dataTransfer.getData("task-type") as 'shell' | 'http' | 'human';
+
+      if (type === "atomic-task" && taskType) {
+        const newTask: Task = {
+          id: crypto.randomUUID(),
+          name: taskType === 'http' ? 'API Request' : taskType === 'human' ? 'Manual Approval' : 'Shell Command',
+          type: taskType,
+          status: 'pending',
+          assignee: taskType === 'human' ? 'Unassigned' : '',
+          params: taskType === 'http' ? { url: 'https://api.example.com', method: 'GET' } :
+            taskType === 'human' ? { instructions: 'Please review...' } :
+              { script: 'echo "Hello"' }
+        };
+
+        // Add to stage
+        setPipelines(prev => prev.map(p => {
+          if (p.id !== activePipelineId) return p;
+          return {
+            ...p,
+            nodes: p.nodes.map(n => n.id === stageId ? { ...n, tasks: [...(n.tasks || []), newTask] } : n)
+          };
+        }));
+        addToHistory();
+      }
+    }, [activePipelineId, addToHistory]
+  );
+
 
   const onDrop = useCallback(
     (event: React.DragEvent<HTMLDivElement>) => {
@@ -1336,6 +1455,24 @@ export default function PipelineApp() {
                 <GitMerge size={16} className="text-purple-500" />{" "}
                 <span>Merge Point</span>
               </button>
+              <button
+                draggable
+                onDragStart={(e) => onDragStart(e, "switch")}
+                className="p-3 bg-white border rounded shadow-sm hover:border-orange-400 text-left flex items-center gap-3 transition-colors cursor-grab"
+              >
+                <Split size={16} className="text-orange-500" />{" "}
+                <span>Switch Node</span>
+              </button>
+
+              <button
+                draggable
+                onDragStart={(e) => onDragStart(e, "script")}
+                className="p-3 bg-white border rounded shadow-sm hover:border-yellow-400 text-left flex items-center gap-3 transition-colors cursor-grab"
+              >
+                <Terminal size={16} className="text-yellow-500" />{" "}
+                <span>Script Node</span>
+              </button>
+
               {/* HIDDEN: Sub-Pipeline not supported by backend yet
               <button
                 draggable
@@ -1353,14 +1490,17 @@ export default function PipelineApp() {
                 </h3>
                 <button
                   draggable
-                  onDragStart={(e) => onDragStart(e, "atomic-task")}
+                  onDragStart={(e) => {
+                    e.dataTransfer.setData("application/reactflow", "atomic-task");
+                    // Default mode is human/role, user can switch
+                    e.dataTransfer.setData("task-type", "human");
+                  }}
                   className="w-full p-3 bg-white border border-dashed border-slate-400 rounded shadow-sm hover:border-blue-500 hover:text-blue-600 text-left flex items-center gap-3 transition-colors cursor-grab"
                 >
-                  <Terminal size={16} /> <span>Atomic Task</span>
+                  <User size={16} /> <span>Atomic Task</span>
                 </button>
                 <p className="text-[10px] text-slate-400 mt-2 px-1">
-                  Drag "Atomic Task" directly onto a Stage in the canvas to add
-                  it.
+                  Drag onto a Stage. Configure as Role Assignment or API.
                 </p>
               </div>
             </div>
@@ -1419,16 +1559,27 @@ export default function PipelineApp() {
                 if (!src || !tgt) return null;
 
                 const x1 = src.x + NODE_WIDTH;
-                const y1 = src.y + 50;
+                // Standard output is top-8 (32px)
+                const y1 = src.y + 32;
                 let finalY1 = y1;
 
                 if (src.type === "condition") {
-                  if (edge.type === "true") finalY1 = src.y + 35;
-                  if (edge.type === "false") finalY1 = src.y + 105;
+                  // Condition handles: top-1/4 (20px) and top-3/4 (60px) of 80px height
+                  if (edge.type === "true") finalY1 = src.y + 20;
+                  if (edge.type === "false") finalY1 = src.y + 60;
+                }
+
+                if (src.type === "switch") {
+                  // Switch handles: Case A/B/C/D
+                  if (edge.type === "case-a") finalY1 = src.y + 70; // Header(48) + 12 + 10
+                  if (edge.type === "case-b") finalY1 = src.y + 94; // +24
+                  if (edge.type === "case-c") finalY1 = src.y + 118; // +24
+                  if (edge.type === "case-d") finalY1 = src.y + 142; // +24
                 }
 
                 const x2 = tgt.x;
-                const y2 = tgt.y + 50;
+                // Standard input is top-8 (32px)
+                const y2 = tgt.y + 32;
 
                 const isSourceActive =
                   src.status === "completed" || src.status === "running";
@@ -1443,8 +1594,7 @@ export default function PipelineApp() {
                 return (
                   <g key={edge.id}>
                     <path
-                      d={`M ${x1} ${finalY1} C ${x1 + 80} ${finalY1}, ${x2 - 80
-                        } ${y2}, ${x2} ${y2}`}
+                      d={getSmartEdgePath(x1, finalY1, x2, y2)}
                       stroke={isSourceActive ? "#6366f1" : edgeColor}
                       strokeWidth={edgeWidth}
                       fill="none"
@@ -1530,7 +1680,7 @@ export default function PipelineApp() {
                   <div
                     key={node.id}
                     onMouseDown={(e) => handleMouseDownNode(e, node.id)}
-                    className={`absolute rounded-lg shadow-md border-2 transition-all cursor-move select-none flex flex-col overflow-hidden ${statusStyles[node.status] || statusStyles.pending
+                    className={`absolute rounded-lg shadow-md border-2 transition-all cursor-move select-none flex flex-col ${statusStyles[node.status] || statusStyles.pending
                       } ${isSelected
                         ? "ring-2 ring-blue-400 border-blue-500 z-20"
                         : "z-10"
@@ -1641,22 +1791,60 @@ export default function PipelineApp() {
                     {node.type === "condition" && (
                       <div className="p-4 relative h-16">
                         <div
-                          className="absolute right-0 top-1/4 translate-x-1/2 w-4 h-4 bg-green-400 rounded-full border-2 border-white hover:scale-125 cursor-crosshair z-20"
+                          className="absolute -right-3 top-1/4 translate-y-[-50%] w-6 h-6 bg-green-100 rounded-full border-2 border-green-500 hover:scale-110 cursor-pointer z-30 flex items-center justify-center transition-transform"
                           title="True"
                           onMouseDown={(e) => startConnection(e, node.id, "true")}
-                        />
+                        >
+                          <div className="w-2 h-2 bg-green-500 rounded-full" />
+                        </div>
                         <div
-                          className="absolute right-0 top-3/4 translate-x-1/2 w-4 h-4 bg-red-400 rounded-full border-2 border-white hover:scale-125 cursor-crosshair z-20"
+                          className="absolute -right-3 top-3/4 translate-y-[-50%] w-6 h-6 bg-red-100 rounded-full border-2 border-red-500 hover:scale-110 cursor-pointer z-30 flex items-center justify-center transition-transform"
                           title="False"
                           onMouseDown={(e) => startConnection(e, node.id, "false")}
-                        />
+                        >
+                          <div className="w-2 h-2 bg-red-500 rounded-full" />
+                        </div>
                         <div className="text-xs text-center text-slate-500 mt-1">
                           Evaluate Rule
                         </div>
                       </div>
                     )}
 
-                    {node.type !== "condition" && node.type !== "end" && (
+                    {/* SWITCH NODE CONTENT */}
+                    {node.type === "switch" && (
+                      <div className="p-4 relative">
+                        <div className="space-y-3">
+                          {['A', 'B', 'C', 'D'].map((opt, i) => (
+                            <div key={opt} className="relative flex items-center justify-end h-6">
+                              <span className="text-xs font-mono mr-2">Case {opt}</span>
+                              <div
+                                className="absolute -right-7 top-1/2 translate-y-[-50%] w-5 h-5 bg-orange-100 rounded-full border-2 border-orange-500 hover:scale-110 cursor-pointer z-30 flex items-center justify-center"
+                                title={`Case ${opt}`}
+                                onMouseDown={(e) => startConnection(e, node.id, `case-${opt.toLowerCase()}` as any)}
+                              >
+                                <div className="w-1.5 h-1.5 bg-orange-500 rounded-full" />
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* SCRIPT NODE CONTENT */}
+                    {node.type === "script" && (
+                      <div className="p-4 bg-slate-900 text-green-400 font-mono text-xs h-full rounded-b-lg overflow-hidden">
+                        <div className="flex items-center gap-2 mb-2 border-b border-slate-700 pb-1">
+                          <Terminal size={12} />
+                          <span>script.js</span>
+                        </div>
+                        <div className="opacity-70 italic">
+                               // Custom logic...<br />
+                          return true;
+                        </div>
+                      </div>
+                    )}
+
+                    {node.type !== "condition" && node.type !== "end" && node.type !== "switch" && (
                       <div
                         className="absolute right-0 top-8 translate-x-1/2 w-4 h-4 bg-slate-400 rounded-full border-2 border-white hover:bg-blue-500 cursor-crosshair z-20"
                         onMouseDown={(e) => startConnection(e, node.id)}
@@ -1749,7 +1937,20 @@ export default function PipelineApp() {
                         </button>
                       </label>
 
-                      <div className="space-y-3">
+                      <div
+                        className="space-y-3 min-h-[50px] transition-colors rounded-lg"
+                        onDragOver={(e) => {
+                          e.preventDefault();
+                          e.currentTarget.classList.add('bg-blue-50/50', 'ring-2', 'ring-blue-100');
+                        }}
+                        onDragLeave={(e) => {
+                          e.currentTarget.classList.remove('bg-blue-50/50', 'ring-2', 'ring-blue-100');
+                        }}
+                        onDrop={(e) => {
+                          e.currentTarget.classList.remove('bg-blue-50/50', 'ring-2', 'ring-blue-100');
+                          handleStageDrop(e, selectedNode.id);
+                        }}
+                      >
                         {(!selectedNode.tasks ||
                           selectedNode.tasks.length === 0) && (
                             <div className="text-center p-6 border-2 border-dashed border-slate-200 rounded-lg text-xs text-slate-400 bg-slate-50">
@@ -1822,59 +2023,248 @@ export default function PipelineApp() {
                               </div>
 
                               {/* Task Details */}
-                              <div className="p-3 space-y-2">
+                              {/* Task Details */}
+                              {/* Task Details */}
+                              <div className="p-3 space-y-3 border-t bg-slate-50/50">
+
+                                {/* MODE SELECTOR */}
                                 <div>
                                   <label className="text-[9px] font-bold text-slate-400 uppercase">
-                                    Command
+                                    Task Mode
                                   </label>
-                                  <div className="flex items-center gap-2 mt-1">
-                                    <Terminal
-                                      size={12}
-                                      className="text-slate-400"
-                                    />
-                                    <input
-                                      className="bg-slate-50 border rounded px-2 py-1.5 w-full font-mono text-[10px] text-slate-600 outline-none focus:bg-white focus:border-blue-400 transition-colors"
-                                      value={task.command}
-                                      onChange={(e) =>
-                                        updateTask(
-                                          selectedNode.id,
-                                          task.id,
-                                          "command",
-                                          e.target.value,
-                                        )
-                                      }
-                                      placeholder="e.g. npm run build"
-                                    />
+                                  <div className="flex bg-slate-200 rounded p-0.5 mt-1">
+                                    <button
+                                      className={`flex-1 text-[10px] font-bold py-1 px-2 rounded transition-all ${(!task.type || task.type === 'human') ? 'bg-white shadow text-pink-600' : 'text-slate-500 hover:bg-slate-300/50'}`}
+                                      onClick={() => updateTask(selectedNode.id, task.id, 'type', 'human')}
+                                    >
+                                      Role Assignment
+                                    </button>
+                                    <button
+                                      className={`flex-1 text-[10px] font-bold py-1 px-2 rounded transition-all ${task.type === 'http' ? 'bg-white shadow text-cyan-600' : 'text-slate-500 hover:bg-slate-300/50'}`}
+                                      onClick={() => updateTask(selectedNode.id, task.id, 'type', 'http')}
+                                    >
+                                      External API
+                                    </button>
                                   </div>
                                 </div>
-                                <div>
-                                  <label className="text-[9px] font-bold text-slate-400 uppercase">
-                                    Assignee
-                                  </label>
-                                  <div className="flex items-center gap-2 mt-1">
-                                    <User
-                                      size={12}
-                                      className="text-slate-400"
-                                    />
-                                    <input
-                                      className="bg-white border rounded px-2 py-1.5 w-full text-[10px] outline-none focus:border-blue-400"
-                                      value={task.assignee}
-                                      onChange={(e) =>
-                                        updateTask(
-                                          selectedNode.id,
-                                          task.id,
-                                          "assignee",
-                                          e.target.value,
-                                        )
-                                      }
-                                      placeholder="Unassigned"
-                                    />
+
+                                {/* HTTP CONFIG */}
+                                {task.type === 'http' && (
+                                  <div className="space-y-3 animate-in fade-in zoom-in-95 duration-200">
+                                    <div className="flex gap-2">
+                                      <div className="w-1/3">
+                                        <label className="text-[9px] font-bold text-slate-400 uppercase">Method</label>
+                                        <select
+                                          className="w-full text-[10px] border rounded px-1 py-1.5 mt-1 bg-white font-mono"
+                                          value={task.params?.method || 'POST'}
+                                          onChange={(e) => updateTask(selectedNode.id, task.id, 'params', { ...task.params, method: e.target.value })}
+                                        >
+                                          <option value="GET">GET</option>
+                                          <option value="POST">POST</option>
+                                          <option value="PUT">PUT</option>
+                                          <option value="DELETE">DELETE</option>
+                                        </select>
+                                      </div>
+                                      <div className="flex-1">
+                                        <label className="text-[9px] font-bold text-slate-400 uppercase">Endpoint URL</label>
+                                        <input
+                                          className="w-full text-[10px] border rounded px-2 py-1.5 mt-1 font-mono text-slate-600 outline-none focus:border-cyan-400"
+                                          value={task.params?.url || ''}
+                                          placeholder="https://api.example.com/webhook"
+                                          onChange={(e) => updateTask(selectedNode.id, task.id, 'params', { ...task.params, url: e.target.value })}
+                                        />
+                                      </div>
+                                    </div>
+
+                                    <div>
+                                      <label className="text-[9px] font-bold text-slate-400 uppercase">Task Description (Text)</label>
+                                      <textarea
+                                        className="w-full text-[10px] border rounded px-2 py-1 mt-1 h-[60px] resize-none outline-none focus:border-cyan-400"
+                                        value={task.params?.text || ''}
+                                        placeholder="Describe what this API call accomplishes..."
+                                        onChange={(e) => updateTask(selectedNode.id, task.id, 'params', { ...task.params, text: e.target.value })}
+                                      />
+                                    </div>
                                   </div>
-                                </div>
+                                )}
+
+                                {/* HUMAN / ROLE CONFIG (DEFAULT) */}
+                                {(task.type === 'human' || !task.type || task.type === 'shell') && (
+                                  <div className="space-y-3 animate-in fade-in zoom-in-95 duration-200">
+                                    <div>
+                                      <label className="text-[9px] font-bold text-slate-400 uppercase">Assign Role</label>
+                                      <select
+                                        className="w-full text-[10px] border rounded px-2 py-1.5 mt-1 bg-white outline-none focus:border-pink-400"
+                                        value={task.assignee || ''}
+                                        onChange={(e) => updateTask(selectedNode.id, task.id, 'assignee', e.target.value)}
+                                      >
+                                        <option value="">-- Select Role --</option>
+                                        {['Admin', 'Manager', 'Reviewer', 'HR', 'Developer', 'DevOps'].map(role => (
+                                          <option key={role} value={role}>{role}</option>
+                                        ))}
+                                      </select>
+                                    </div>
+
+                                    <div>
+                                      <label className="text-[9px] font-bold text-slate-400 uppercase">Assign User (Optional)</label>
+                                      <select
+                                        className="w-full text-[10px] border rounded px-2 py-1.5 mt-1 bg-white outline-none focus:border-pink-400 disabled:opacity-50"
+                                        value={task.params?.assignedUser || ''}
+                                        disabled={!task.assignee}
+                                        onChange={(e) => updateTask(selectedNode.id, task.id, 'params', { ...task.params, assignedUser: e.target.value })}
+                                      >
+                                        <option value="">-- Any Available User --</option>
+                                        {task.assignee && ({
+                                          'Admin': ['Alice Admin', 'Arnold Auth'],
+                                          'Manager': ['Mary Manager', 'Mike Lead'],
+                                          'Reviewer': ['Randy Reviewer', 'Rachel Read'],
+                                          'HR': ['Harry HR', 'Holly Hire'],
+                                          'Developer': ['Dave Dev', 'Diana Code'],
+                                          'DevOps': ['Doug Ops', 'Daisy Deploy']
+                                        }[task.assignee] || []).map((user: string) => (
+                                          <option key={user} value={user}>{user}</option>
+                                        ))}
+                                      </select>
+                                    </div>
+
+                                    <div>
+                                      <label className="text-[9px] font-bold text-slate-400 uppercase">Task Instructions (Text)</label>
+                                      <textarea
+                                        className="w-full text-[10px] border rounded px-2 py-1 mt-1 h-[60px] resize-none outline-none focus:border-pink-400"
+                                        value={task.params?.text || ''}
+                                        placeholder="Instructions for the assigned person..."
+                                        onChange={(e) => updateTask(selectedNode.id, task.id, 'params', { ...task.params, text: e.target.value })}
+                                      />
+                                    </div>
+
+                                    <div>
+                                      <label className="text-[9px] font-bold text-slate-400 uppercase flex justify-between">
+                                        <span>Outcomes</span>
+                                        <span className="text-slate-300 text-[8px]">(Comma Separated)</span>
+                                      </label>
+                                      <input
+                                        className="w-full text-[10px] border rounded px-2 py-1.5 mt-1 outline-none focus:border-pink-400"
+                                        value={task.params?.outcomes?.join(', ') || ''}
+                                        placeholder="Approve, Reject, Request Changes"
+                                        onChange={(e) => {
+                                          const val = e.target.value;
+                                          const outcomes = val ? val.split(',').map(s => s.trim()) : [];
+                                          updateTask(selectedNode.id, task.id, 'params', { ...task.params, outcomes })
+                                        }}
+                                      />
+                                      <div className="flex gap-1 mt-2 flex-wrap">
+                                        {(task.params?.outcomes?.length > 0 ? task.params.outcomes : ['Approve', 'Reject']).map((outcome: string, i: number) => (
+                                          <span key={i} className="text-[9px] px-1.5 py-0.5 bg-slate-200 rounded text-slate-600 border border-slate-300">
+                                            {outcome}
+                                          </span>
+                                        ))}
+                                      </div>
+                                    </div>
+                                  </div>
+                                )}
                               </div>
                             </div>
                           ))}
                       </div>
+                    </div>
+                  )}
+
+
+
+                  {/* CONDITION NODE CONFIG */}
+                  {selectedNode.type === 'condition' && (
+                    <div className="space-y-4 pt-4 border-t">
+                      <div className="text-xs font-bold text-slate-500 uppercase">Logic Condition</div>
+
+                      {/* 1. Variable */}
+                      <div>
+                        <label className="block text-xs font-medium text-slate-700 mb-1">Variable</label>
+                        <input
+                          className="w-full px-3 py-2 border rounded text-sm mb-2"
+                          placeholder="e.g. step1.status"
+                          value={selectedNode.config?.variable || ''}
+                          onChange={(e) => updateNode(selectedNode.id, { config: { ...selectedNode.config, variable: e.target.value } })}
+                        />
+                      </div>
+
+                      {/* 2. Data Type Selector */}
+                      <div>
+                        <label className="block text-xs font-medium text-slate-700 mb-1">Data Type</label>
+                        <select
+                          className="w-full px-2 py-2 border rounded text-sm mb-2 bg-slate-50"
+                          value={selectedNode.config?.valueType || 'string'}
+                          onChange={(e) => updateNode(selectedNode.id, { config: { ...selectedNode.config, valueType: e.target.value as any, operator: OPERATORS_BY_TYPE[e.target.value as keyof typeof OPERATORS_BY_TYPE][0].value } })}
+                        >
+                          <option value="string">String (Text)</option>
+                          <option value="number">Number</option>
+                          <option value="boolean">Boolean</option>
+                          <option value="date">Date & Time</option>
+                          <option value="array">List / Array</option>
+                        </select>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-2">
+                        {/* 3. Operator */}
+                        <div>
+                          <label className="block text-xs font-medium text-slate-700 mb-1">Operator</label>
+                          <select
+                            className="w-full px-2 py-2 border rounded text-sm"
+                            value={selectedNode.config?.operator || ''}
+                            onChange={(e) => updateNode(selectedNode.id, { config: { ...selectedNode.config, operator: e.target.value } })}
+                          >
+                            {(OPERATORS_BY_TYPE[selectedNode.config?.valueType as keyof typeof OPERATORS_BY_TYPE || 'string']).map(op => (
+                              <option key={op.value} value={op.value}>{op.label}</option>
+                            ))}
+                          </select>
+                        </div>
+
+                        {/* 4. Value Field (Dynamic) */}
+                        {/* Hide value for unary operators like is_empty, is_true */}
+                        {!['is_empty', 'is_not_empty', 'is_true', 'is_false', 'exists', 'not_exists'].includes(selectedNode.config?.operator) && (
+                          <div>
+                            <label className="block text-xs font-medium text-slate-700 mb-1">Value</label>
+                            <input
+                              className="w-full px-3 py-2 border rounded text-sm"
+                              type={selectedNode.config?.valueType === 'number' ? 'number' : selectedNode.config?.valueType === 'date' ? 'date' : 'text'}
+                              placeholder="value"
+                              value={selectedNode.config?.value || ''}
+                              onChange={(e) => updateNode(selectedNode.id, { config: { ...selectedNode.config, value: e.target.value } })}
+                            />
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* SWITCH NODE CONFIG */}
+                  {selectedNode.type === 'switch' && (
+                    <div className="space-y-4 pt-4 border-t">
+                      <div className="text-xs font-bold text-slate-500 uppercase">Switch Logic</div>
+                      <div>
+                        <label className="block text-xs font-medium text-slate-700 mb-1">Variable to Check</label>
+                        <input
+                          className="w-full px-3 py-2 border rounded text-sm"
+                          placeholder="e.g. event.type"
+                          value={selectedNode.config?.variable || ''}
+                          onChange={(e) => updateNode(selectedNode.id, { config: { ...selectedNode.config, variable: e.target.value } })}
+                        />
+                      </div>
+                      <div className="text-xs text-slate-500 italic">
+                        Paths: Case A, Case B, Case C, Case D
+                      </div>
+                    </div>
+                  )}
+
+                  {/* SCRIPT NODE CONFIG */}
+                  {selectedNode.type === 'script' && (
+                    <div className="space-y-4 pt-4 border-t flex flex-col h-[500px]">
+                      <div className="text-xs font-bold text-slate-500 uppercase">JavaScript Code</div>
+                      <textarea
+                        className="w-full flex-1 p-3 font-mono text-xs bg-slate-900 text-green-400 rounded border border-slate-700 focus:ring-1 focus:ring-green-500 outline-none resize-none"
+                        placeholder="// Write your JS here...\nreturn true;"
+                        value={selectedNode.config?.code || ''}
+                        onChange={(e) => updateNode(selectedNode.id, { config: { ...selectedNode.config, code: e.target.value } })}
+                      />
                     </div>
                   )}
 
