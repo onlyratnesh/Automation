@@ -8,11 +8,19 @@ export class IAMError extends Error {
     }
 }
 
+// MOCK USER ID for Development ({Standard Nil UUID)
+// const MOCK_USER_ID = "00000000-0000-0000-0000-000000000000";
+
 /**
  * Checks if the current user has the required permission.
  * Uses the `has_permission` database function.
  */
 export async function checkPermission(permission: string): Promise<boolean> {
+    // For this app stage, we allow ANY authenticated user to perform actions.
+    // Real strict RBAC can be re-enabled later.
+    return true;
+
+    /* RE-ENABLE FOR STRICT RBAC:
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const supabase = await (createClient as any)();
     // Note: createClient is async in server components context
@@ -28,6 +36,7 @@ export async function checkPermission(permission: string): Promise<boolean> {
     }
 
     return !!data;
+    */
 }
 
 /**

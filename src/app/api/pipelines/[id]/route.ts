@@ -22,9 +22,11 @@ export async function PUT(req: NextRequest, { params }: { params: any }) {
     try {
         const { id } = await params;
         const body = await req.json();
+        console.log('[API PUT /pipelines/[id]] Updating pipeline:', id);
         const pipeline = await PipelineService.update(id, body);
         return NextResponse.json(pipeline);
     } catch (error: any) {
+        console.error('[API PUT /pipelines/[id]] Error:', error.message, error.stack);
         if (error instanceof IAMError) {
             return NextResponse.json({ error: error.message }, { status: 403 });
         }

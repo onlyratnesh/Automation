@@ -4,9 +4,8 @@ import { cookies } from 'next/headers'
 export async function createClient() {
     const cookieStore = await cookies()
 
-    // check if we have the publishable key, if not fallback to anon key (common confusion)
-    // But based on USER_REQUEST we use PUBLISHABLE_KEY
-    const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
+    // Use the actual anon key (JWT format) - PUBLISHABLE_KEY is not a valid Supabase key
+    const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
 
     return createServerClient(
         process.env.NEXT_PUBLIC_SUPABASE_URL!,

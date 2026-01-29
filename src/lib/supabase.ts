@@ -32,3 +32,24 @@ export type PipelineRunLog = {
   timestamp: string;
   message: string;
 };
+
+// Role & User Types
+export type UserProfile = {
+  id: string;
+  email: string; // from auth.users or public table
+  full_name?: string;
+};
+
+export type Role = {
+  id: string;
+  name: string;
+  description?: string;
+  created_at?: string;
+};
+
+export type UserRole = {
+  id: string;
+  user_id: string;
+  role_id: string;
+  created_at?: string;
+};

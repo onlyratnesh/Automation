@@ -27,7 +27,7 @@ export default function LoginPage() {
             setError(error.message);
             setLoading(false);
         } else {
-            router.push("/test-backend"); // Redirect to verification page
+            router.push("/"); // Redirect to Pipeline Panel
             router.refresh();
         }
     };

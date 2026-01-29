@@ -1,5 +1,7 @@
 "use client";
 
+import Link from "next/link";
+import { supabase, Role, UserProfile } from "@/lib/supabase";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   Play,
@@ -143,138 +145,11 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const INITIAL_PIPELINES: Pipeline[] = [
   {
     id: "p1",
-    name: "Production Deploy",
+    name: "New Pipeline",
     onSuccessPipelineId: "",
     status: "idle",
-    nodes: [
-      {
-        id: "s1",
-        type: "stage",
-        x: 50,
-        y: 150,
-        label: "Build & Unit Test",
-        status: "pending",
-        tasks: [
-          {
-            id: "t1",
-            name: "Checkout Code",
-            type: "shell",
-            command: "git pull origin main",
-            assignee: "System",
-            status: "pending",
-          },
-          {
-            id: "t2",
-            name: "Install Dependencies",
-            type: "shell",
-            command: "npm install",
-            assignee: "System",
-            status: "pending",
-          },
-          {
-            id: "t3",
-            name: "Run Unit Tests",
-            type: "shell",
-            command: "npm test",
-            assignee: "DevOps Bot",
-            status: "pending",
-          },
-        ],
-      },
-      {
-        id: "s2",
-        type: "stage",
-        x: 400,
-        y: 50,
-        label: "Security Scan",
-        status: "pending",
-        tasks: [
-          {
-            id: "t1",
-            name: "SAST Scan",
-            type: "shell",
-            command: "run-sast",
-            assignee: "SecOps",
-            status: "pending",
-          },
-        ],
-      },
-      {
-        id: "s3",
-        type: "stage",
-        x: 400,
-        y: 250,
-        label: "Integration Tests",
-        status: "pending",
-        tasks: [
-          {
-            id: "t1",
-            name: "Deploy to Staging",
-            type: "shell",
-            command: "helm upgrade staging",
-            assignee: "DevOps",
-            status: "pending",
-          },
-          {
-            id: "t2",
-            name: "Run Cypress",
-            type: "shell",
-            command: "npm run e2e",
-            assignee: "QA Lead",
-            status: "pending",
-          },
-        ],
-      },
-      {
-        id: "s4",
-        type: "merge",
-        x: 750,
-        y: 150,
-        label: "Gate",
-        status: "pending",
-      },
-      {
-        id: "s5",
-        type: "stage",
-        x: 950,
-        y: 150,
-        label: "Deploy to Prod",
-        status: "pending",
-        tasks: [
-          {
-            id: "t1",
-            name: "Manual Approval",
-            type: "human",
-            command: "wait-for-approval",
-            assignee: "Manager",
-            status: "pending",
-          },
-          {
-            id: "t2",
-            name: "Promote Image",
-            type: "shell",
-            command: "docker push prod",
-            assignee: "System",
-            status: "pending",
-          },
-          {
-            id: "t3",
-            name: "Apply K8s",
-            type: "shell",
-            command: "kubectl apply -f prod.yaml",
-            assignee: "Admin",
-            status: "pending",
-          },
-        ],
-      },
-    ],
-    edges: [
-      { id: "e1", source: "s1", target: "s2", type: "default" },
-      { id: "e2", source: "s1", target: "s3", type: "default" },
-      { id: "e3", source: "s2", target: "s4", type: "default" },
-      { id: "e4", source: "s3", target: "s4", type: "default" },
-      { id: "e5", source: "s4", target: "s5", type: "default" },
-    ],
+    nodes: [],
+    edges: [],
   },
 ];
 
@@ -347,6 +222,72 @@ export default function PipelineApp() {
   const [draggedTaskIndex, setDraggedTaskIndex] = useState<number | null>(
     null,
   );
+
+  // SUPABASE ROLES & USERS STATE
+  const [availableRoles, setAvailableRoles] = useState<Role[]>([]);
+  const [roleUsersMap, setRoleUsersMap] = useState<Record<string, UserProfile[]>>({});
+
+  // LEADS STATE
+  type Lead = { id: string; name: string; phone?: string; status: string; priority: string; };
+  const [availableLeads, setAvailableLeads] = useState<Lead[]>([]);
+
+  useEffect(() => {
+    // Fetch Roles on mount
+    const fetchRoles = async () => {
+      const { data } = await supabase.from('roles').select('*');
+      if (data) setAvailableRoles(data);
+    };
+    fetchRoles();
+
+    // Fetch Leads on mount
+    const fetchLeads = async () => {
+      try {
+        const res = await fetch('/api/leads');
+        if (res.ok) {
+          const data = await res.json();
+          setAvailableLeads(data);
+        }
+      } catch (e) { console.error('Failed to fetch leads:', e); }
+    };
+    fetchLeads();
+  }, []);
+
+  // Fetch Users when a role is selected (or pre-fetch all)
+  const fetchUsersForRole = async (roleName: string) => {
+    // find role id by name (since we store name in assignee for now)
+    const roleObj = availableRoles.find(r => r.name === roleName);
+    if (!roleObj || roleUsersMap[roleName]) return;
+
+    const { data } = await supabase
+      .from("user_roles")
+      .select("*, users:user_id(*)")
+      .eq("role_id", roleObj.id);
+
+    if (data) {
+      const users = data.map((d: any) => d.users).filter(Boolean) as UserProfile[];
+      setRoleUsersMap(prev => ({ ...prev, [roleName]: users }));
+    }
+  };
+
+  // AUTO-FETCH users for existing task assignees when pipelines load
+  useEffect(() => {
+    if (availableRoles.length === 0 || pipelines.length === 0) return;
+
+    // Collect all unique assignees from all tasks
+    const allAssignees = new Set<string>();
+    pipelines.forEach(p => {
+      p.nodes.forEach(n => {
+        n.tasks?.forEach(t => {
+          if (t.assignee && !roleUsersMap[t.assignee]) {
+            allAssignees.add(t.assignee);
+          }
+        });
+      });
+    });
+
+    // Fetch users for each assignee role
+    allAssignees.forEach(roleName => fetchUsersForRole(roleName));
+  }, [availableRoles, pipelines]);
 
   const canvasRef = useRef<HTMLDivElement | null>(null);
 
@@ -722,6 +663,18 @@ export default function PipelineApp() {
       addServerLog(`❌ Error saving pipeline: ${message}`);
     }
   }, [activePipeline, addServerLog]);
+
+  // --- AUTO-SAVE HOOK ---
+  useEffect(() => {
+    // Debounce save (e.g. 3 seconds after last change)
+    const timer = setTimeout(() => {
+      if (activePipeline?.id && activePipeline.status !== 'running') {
+        saveActivePipelineToServer();
+      }
+    }, 3000);
+
+    return () => clearTimeout(timer);
+  }, [activePipeline, saveActivePipelineToServer]);
 
   const pollServerRunLogs = useCallback(
     async (runId: string) => {
@@ -2093,16 +2046,30 @@ export default function PipelineApp() {
                                   <div className="space-y-3 animate-in fade-in zoom-in-95 duration-200">
                                     <div>
                                       <label className="text-[9px] font-bold text-slate-400 uppercase">Assign Role</label>
-                                      <select
-                                        className="w-full text-[10px] border rounded px-2 py-1.5 mt-1 bg-white outline-none focus:border-pink-400"
-                                        value={task.assignee || ''}
-                                        onChange={(e) => updateTask(selectedNode.id, task.id, 'assignee', e.target.value)}
-                                      >
-                                        <option value="">-- Select Role --</option>
-                                        {['Admin', 'Manager', 'Reviewer', 'HR', 'Developer', 'DevOps'].map(role => (
-                                          <option key={role} value={role}>{role}</option>
-                                        ))}
-                                      </select>
+                                      <div className="flex gap-2">
+                                        <select
+                                          className="flex-1 text-[10px] border rounded px-2 py-1.5 mt-1 bg-white outline-none focus:border-pink-400"
+                                          value={task.assignee || ''}
+                                          onChange={(e) => {
+                                            const roleName = e.target.value;
+                                            updateTask(selectedNode.id, task.id, 'assignee', roleName);
+                                            if (roleName) fetchUsersForRole(roleName);
+                                          }}
+                                        >
+                                          <option value="">-- Select Role --</option>
+                                          {availableRoles.length > 0 ? availableRoles.map(role => (
+                                            <option key={role.id} value={role.name}>{role.name}</option>
+                                          )) : (
+                                            // Fallback if no db roles
+                                            ['Admin', 'Manager', 'Reviewer'].map(role => <option key={role} value={role}>{role}</option>)
+                                          )}
+                                        </select>
+                                        <div className="flex justify-end mt-1">
+                                          <Link href="/roles" target="_blank" className="text-[9px] bg-slate-100 hover:bg-slate-200 px-2 py-1 rounded text-slate-500 flex items-center gap-1" title="Manage Roles">
+                                            <Settings size={10} /> Manage Roles
+                                          </Link>
+                                        </div>
+                                      </div>
                                     </div>
 
                                     <div>
@@ -2114,17 +2081,19 @@ export default function PipelineApp() {
                                         onChange={(e) => updateTask(selectedNode.id, task.id, 'params', { ...task.params, assignedUser: e.target.value })}
                                       >
                                         <option value="">-- Any Available User --</option>
-                                        {task.assignee && ({
-                                          'Admin': ['Alice Admin', 'Arnold Auth'],
-                                          'Manager': ['Mary Manager', 'Mike Lead'],
-                                          'Reviewer': ['Randy Reviewer', 'Rachel Read'],
-                                          'HR': ['Harry HR', 'Holly Hire'],
-                                          'Developer': ['Dave Dev', 'Diana Code'],
-                                          'DevOps': ['Doug Ops', 'Daisy Deploy']
-                                        }[task.assignee] || []).map((user: string) => (
-                                          <option key={user} value={user}>{user}</option>
-                                        ))}
+                                        {(task.assignee && roleUsersMap[task.assignee]) ? (
+                                          roleUsersMap[task.assignee].map((user) => (
+                                            <option key={user.id} value={user.full_name || user.email}>{user.full_name || user.email}</option>
+                                          ))
+                                        ) : (
+                                          <option disabled>No users found in this role</option>
+                                        )}
                                       </select>
+                                    </div>
+                                    <div className="flex justify-end">
+                                      <Link href="/users" target="_blank" className="text-[9px] bg-slate-100 hover:bg-slate-200 px-2 py-1 rounded text-slate-500 flex items-center gap-1" title="Manage Users Directory">
+                                        <Users size={10} /> Manage User Directory
+                                      </Link>
                                     </div>
 
                                     <div>
@@ -2137,27 +2106,233 @@ export default function PipelineApp() {
                                       />
                                     </div>
 
-                                    <div>
-                                      <label className="text-[9px] font-bold text-slate-400 uppercase flex justify-between">
-                                        <span>Outcomes</span>
-                                        <span className="text-slate-300 text-[8px]">(Comma Separated)</span>
+                                    {/* PRIORITY & FOLLOW-UP SECTION */}
+                                    <div className="space-y-3 p-3 bg-gradient-to-br from-amber-50 to-orange-50 rounded-lg border border-amber-200">
+                                      <label className="text-[9px] font-bold text-amber-700 uppercase flex items-center gap-1">
+                                        <span>🎯</span> Priority & Follow-up
                                       </label>
-                                      <input
-                                        className="w-full text-[10px] border rounded px-2 py-1.5 mt-1 outline-none focus:border-pink-400"
-                                        value={task.params?.outcomes?.join(', ') || ''}
-                                        placeholder="Approve, Reject, Request Changes"
-                                        onChange={(e) => {
-                                          const val = e.target.value;
-                                          const outcomes = val ? val.split(',').map(s => s.trim()) : [];
-                                          updateTask(selectedNode.id, task.id, 'params', { ...task.params, outcomes })
+
+                                      {/* Priority Dropdown */}
+                                      <div>
+                                        <label className="text-[8px] text-slate-500 uppercase">Priority</label>
+                                        <select
+                                          className="w-full text-[10px] border-2 rounded px-2 py-1.5 mt-0.5 outline-none focus:border-amber-400 bg-white font-medium"
+                                          value={task.params?.priority || 'Medium'}
+                                          onChange={(e) => updateTask(selectedNode.id, task.id, 'params', { ...task.params, priority: e.target.value })}
+                                          style={{
+                                            borderColor: task.params?.priority === 'High' ? '#ef4444' :
+                                              task.params?.priority === 'Low' ? '#22c55e' : '#eab308',
+                                            backgroundColor: task.params?.priority === 'High' ? '#fef2f2' :
+                                              task.params?.priority === 'Low' ? '#f0fdf4' : '#fefce8'
+                                          }}
+                                        >
+                                          <option value="High">🔴 High Priority</option>
+                                          <option value="Medium">🟡 Medium Priority</option>
+                                          <option value="Low">🟢 Low Priority</option>
+                                        </select>
+                                      </div>
+
+                                      {/* Follow-up Date */}
+                                      <div>
+                                        <label className="text-[8px] text-slate-500 uppercase">Follow-up Date</label>
+                                        <input
+                                          type="date"
+                                          className="w-full text-[10px] border rounded px-2 py-1.5 mt-0.5 outline-none focus:border-amber-400 bg-white"
+                                          value={task.params?.followUpDate || ''}
+                                          onChange={(e) => updateTask(selectedNode.id, task.id, 'params', { ...task.params, followUpDate: e.target.value })}
+                                        />
+                                        <p className="text-[8px] text-slate-400 mt-0.5">Schedule next contact with lead</p>
+                                      </div>
+
+                                      {/* Link to Lead/Deal */}
+                                      <div>
+                                        <label className="text-[8px] text-slate-500 uppercase">Linked Lead/Deal</label>
+                                        <div className="flex gap-2">
+                                          <select
+                                            className="flex-1 text-[10px] border rounded px-2 py-1.5 mt-0.5 outline-none focus:border-amber-400 bg-white"
+                                            value={task.params?.linkedLeadId || ''}
+                                            onChange={(e) => updateTask(selectedNode.id, task.id, 'params', {
+                                              ...task.params,
+                                              linkedLeadId: e.target.value,
+                                              linkedLead: availableLeads.find(l => l.id === e.target.value)?.name || ''
+                                            })}
+                                          >
+                                            <option value="">-- Select Lead --</option>
+                                            {availableLeads.map(lead => (
+                                              <option key={lead.id} value={lead.id}>
+                                                {lead.priority === 'High' ? '🔴' : lead.priority === 'Low' ? '🟢' : '🟡'} {lead.name} ({lead.status})
+                                              </option>
+                                            ))}
+                                          </select>
+                                        </div>
+                                        <div className="flex justify-between items-center mt-1">
+                                          <p className="text-[8px] text-slate-400">Connect this task to a specific lead</p>
+                                          <Link href="/leads" target="_blank" className="text-[8px] text-amber-600 hover:underline">
+                                            Manage Leads →
+                                          </Link>
+                                        </div>
+                                      </div>
+
+                                      {/* Reminder Toggle */}
+                                      <div className="flex items-center gap-2">
+                                        <input
+                                          type="checkbox"
+                                          id={`reminder-${task.id}`}
+                                          className="w-3 h-3 accent-amber-500"
+                                          checked={task.params?.reminderEnabled || false}
+                                          onChange={(e) => updateTask(selectedNode.id, task.id, 'params', { ...task.params, reminderEnabled: e.target.checked })}
+                                        />
+                                        <label htmlFor={`reminder-${task.id}`} className="text-[9px] text-slate-600">
+                                          Enable Reminder
+                                        </label>
+                                        {task.params?.reminderEnabled && (
+                                          <select
+                                            className="text-[9px] border rounded px-1.5 py-0.5 outline-none"
+                                            value={task.params?.reminderTime || '1h'}
+                                            onChange={(e) => updateTask(selectedNode.id, task.id, 'params', { ...task.params, reminderTime: e.target.value })}
+                                          >
+                                            <option value="15m">15 min before</option>
+                                            <option value="30m">30 min before</option>
+                                            <option value="1h">1 hour before</option>
+                                            <option value="1d">1 day before</option>
+                                          </select>
+                                        )}
+                                      </div>
+                                    </div>
+
+                                    {/* DATE/TIME LIMITS SECTION */}
+                                    <div className="space-y-3 p-3 bg-slate-50 rounded-lg border border-slate-200">
+                                      <label className="text-[9px] font-bold text-slate-500 uppercase flex items-center gap-1">
+                                        <span>⏰</span> Deadline
+                                      </label>
+
+                                      {/* Due Date & Time */}
+                                      <div className="grid grid-cols-2 gap-2">
+                                        <div>
+                                          <label className="text-[8px] text-slate-400 uppercase">Due Date</label>
+                                          <input
+                                            type="date"
+                                            className="w-full text-[10px] border rounded px-2 py-1.5 mt-0.5 outline-none focus:border-pink-400 bg-white"
+                                            value={task.params?.dueDate || ''}
+                                            onChange={(e) => updateTask(selectedNode.id, task.id, 'params', { ...task.params, dueDate: e.target.value })}
+                                          />
+                                        </div>
+                                        <div>
+                                          <label className="text-[8px] text-slate-400 uppercase">Due Time</label>
+                                          <input
+                                            type="time"
+                                            className="w-full text-[10px] border rounded px-2 py-1.5 mt-0.5 outline-none focus:border-pink-400 bg-white"
+                                            value={task.params?.dueTime || ''}
+                                            onChange={(e) => updateTask(selectedNode.id, task.id, 'params', { ...task.params, dueTime: e.target.value })}
+                                          />
+                                        </div>
+                                      </div>
+
+                                      {/* Duration Estimate */}
+                                      <div>
+                                        <label className="text-[8px] text-slate-400 uppercase">Estimated Duration (minutes)</label>
+                                        <input
+                                          type="number"
+                                          min="1"
+                                          className="w-full text-[10px] border rounded px-2 py-1.5 mt-0.5 outline-none focus:border-pink-400 bg-white"
+                                          value={task.params?.estimatedDuration || ''}
+                                          placeholder="e.g., 30"
+                                          onChange={(e) => updateTask(selectedNode.id, task.id, 'params', { ...task.params, estimatedDuration: e.target.value })}
+                                        />
+                                      </div>
+                                    </div>
+                                    {/* OUTCOMES SECTION - ENHANCED */}
+                                    <div className="space-y-2">
+                                      <label className="text-[9px] font-bold text-slate-400 uppercase flex justify-between items-center">
+                                        <span>Task Outcome</span>
+                                      </label>
+
+                                      {/* Current Outcome Dropdown */}
+                                      <select
+                                        className="w-full text-[10px] border-2 rounded px-2 py-1.5 bg-white outline-none focus:border-pink-400 font-medium"
+                                        value={task.params?.selectedOutcome || ''}
+                                        onChange={(e) => updateTask(selectedNode.id, task.id, 'params', { ...task.params, selectedOutcome: e.target.value })}
+                                        style={{
+                                          borderColor: task.params?.selectedOutcome === 'Done' ? '#22c55e' :
+                                            task.params?.selectedOutcome === 'Not Done' ? '#ef4444' : '#e2e8f0',
+                                          backgroundColor: task.params?.selectedOutcome === 'Done' ? '#f0fdf4' :
+                                            task.params?.selectedOutcome === 'Not Done' ? '#fef2f2' : 'white'
                                         }}
-                                      />
-                                      <div className="flex gap-1 mt-2 flex-wrap">
-                                        {(task.params?.outcomes?.length > 0 ? task.params.outcomes : ['Approve', 'Reject']).map((outcome: string, i: number) => (
-                                          <span key={i} className="text-[9px] px-1.5 py-0.5 bg-slate-200 rounded text-slate-600 border border-slate-300">
-                                            {outcome}
-                                          </span>
+                                      >
+                                        <option value="">-- Select Outcome --</option>
+                                        {(task.params?.outcomes?.length > 0 ? task.params.outcomes : ['Done', 'Not Done']).map((outcome: string, i: number) => (
+                                          <option key={i} value={outcome}>{outcome}</option>
                                         ))}
+                                      </select>
+
+                                      {/* Outcome Badges with Colors */}
+                                      <div className="flex gap-1 flex-wrap items-center">
+                                        <span className="text-[8px] text-slate-400 mr-1">Available:</span>
+                                        {(task.params?.outcomes?.length > 0 ? task.params.outcomes : ['Done', 'Not Done']).map((outcome: string, i: number) => {
+                                          const isGreen = outcome.toLowerCase().includes('done') && !outcome.toLowerCase().includes('not');
+                                          const isRed = outcome.toLowerCase().includes('not') || outcome.toLowerCase().includes('reject') || outcome.toLowerCase().includes('fail');
+                                          return (
+                                            <span
+                                              key={i}
+                                              className={`text-[9px] px-1.5 py-0.5 rounded border flex items-center gap-1 ${isGreen ? 'bg-green-100 text-green-700 border-green-300' :
+                                                isRed ? 'bg-red-100 text-red-700 border-red-300' :
+                                                  'bg-slate-100 text-slate-600 border-slate-300'
+                                                }`}
+                                            >
+                                              {outcome}
+                                              <button
+                                                type="button"
+                                                className="hover:text-red-500 ml-0.5"
+                                                onClick={() => {
+                                                  const currentOutcomes = task.params?.outcomes?.length > 0 ? [...task.params.outcomes] : ['Done', 'Not Done'];
+                                                  const filtered = currentOutcomes.filter((_: string, idx: number) => idx !== i);
+                                                  updateTask(selectedNode.id, task.id, 'params', {
+                                                    ...task.params,
+                                                    outcomes: filtered.length > 0 ? filtered : ['Done', 'Not Done'],
+                                                    selectedOutcome: task.params?.selectedOutcome === outcome ? '' : task.params?.selectedOutcome
+                                                  });
+                                                }}
+                                              >
+                                                <X size={8} />
+                                              </button>
+                                            </span>
+                                          );
+                                        })}
+                                      </div>
+
+                                      {/* Add New Outcome */}
+                                      <div className="flex gap-1 mt-1">
+                                        <input
+                                          className="flex-1 text-[10px] border rounded px-2 py-1 outline-none focus:border-pink-400"
+                                          placeholder="Add custom outcome..."
+                                          onKeyDown={(e) => {
+                                            if (e.key === 'Enter' && (e.target as HTMLInputElement).value.trim()) {
+                                              const newOutcome = (e.target as HTMLInputElement).value.trim();
+                                              const currentOutcomes = task.params?.outcomes?.length > 0 ? [...task.params.outcomes] : ['Done', 'Not Done'];
+                                              if (!currentOutcomes.includes(newOutcome)) {
+                                                updateTask(selectedNode.id, task.id, 'params', { ...task.params, outcomes: [...currentOutcomes, newOutcome] });
+                                              }
+                                              (e.target as HTMLInputElement).value = '';
+                                            }
+                                          }}
+                                        />
+                                        <button
+                                          type="button"
+                                          className="text-[9px] px-2 py-1 bg-blue-500 text-white rounded hover:bg-blue-600"
+                                          onClick={(e) => {
+                                            const input = (e.target as HTMLElement).previousElementSibling as HTMLInputElement;
+                                            if (input && input.value.trim()) {
+                                              const newOutcome = input.value.trim();
+                                              const currentOutcomes = task.params?.outcomes?.length > 0 ? [...task.params.outcomes] : ['Done', 'Not Done'];
+                                              if (!currentOutcomes.includes(newOutcome)) {
+                                                updateTask(selectedNode.id, task.id, 'params', { ...task.params, outcomes: [...currentOutcomes, newOutcome] });
+                                              }
+                                              input.value = '';
+                                            }
+                                          }}
+                                        >
+                                          Add
+                                        </button>
                                       </div>
                                     </div>
                                   </div>
@@ -2300,6 +2475,13 @@ export default function PipelineApp() {
                       {selectedNode.type}
                     </span>
                   </div>
+
+                  <button
+                    onClick={saveActivePipelineToServer}
+                    className="w-full py-2 bg-green-600 text-white hover:bg-green-700 rounded text-sm font-bold shadow-sm transition-all flex items-center justify-center gap-2 mt-4"
+                  >
+                    <CheckCircle2 size={16} /> Save Changes
+                  </button>
                   <button
                     onClick={() => deleteNode(selectedNode.id)}
                     className="w-full py-2 text-red-600 border border-red-200 hover:bg-red-50 rounded text-sm transition-colors flex items-center justify-center gap-2 mt-2"
@@ -2392,6 +2574,6 @@ export default function PipelineApp() {
       <style>
         {`@keyframes progress-bar { 0% { width: 0%; transform: translateX(-100%); } 50% { width: 100%; transform: translateX(0); } 100% { width: 100%; transform: translateX(100%); }`}
       </style>
-    </div>
+    </div >
   );
 }
