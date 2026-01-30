@@ -19,6 +19,7 @@ export type Lead = {
     notes?: string;
     follow_up_date?: string;
     priority: string;
+    last_contacted_at?: string;
     created_at: string;
     updated_at: string;
     user_id: string;

@@ -18,6 +18,7 @@ type Lead = {
     notes?: string;
     follow_up_date?: string;
     priority: string;
+    last_contacted_at?: string;
     created_at: string;
 };
 
@@ -56,6 +57,7 @@ export default function LeadsPage() {
         priority: "Medium",
         notes: "",
         follow_up_date: "",
+        last_contacted_at: "",
     });
 
     const fetchLeads = async () => {
@@ -94,7 +96,7 @@ export default function LeadsPage() {
                 setEditingLead(null);
                 setFormData({
                     name: "", phone: "", email: "", source: "Website",
-                    status: "New", priority: "Medium", notes: "", follow_up_date: "",
+                    status: "New", priority: "Medium", notes: "", follow_up_date: "", last_contacted_at: "",
                 });
             }
         } catch (error) {
@@ -123,6 +125,7 @@ export default function LeadsPage() {
             priority: lead.priority,
             notes: lead.notes || "",
             follow_up_date: lead.follow_up_date || "",
+            last_contacted_at: lead.last_contacted_at || "",
         });
         setShowAddModal(true);
     };
@@ -193,7 +196,9 @@ export default function LeadsPage() {
                         <div key={lead.id} className="bg-white rounded-xl border border-slate-200 p-4 hover:shadow-lg transition">
                             <div className="flex items-start justify-between mb-3">
                                 <div>
-                                    <h3 className="font-semibold text-slate-800">{lead.name}</h3>
+                                    <Link href={`/leads/${lead.id}`} className="font-semibold text-slate-800 hover:text-blue-600 hover:underline">
+                                        {lead.name}
+                                    </Link>
                                     <span className={`inline-block text-[10px] px-2 py-0.5 rounded-full border mt-1 ${statusColors[lead.status]}`}>
                                         {lead.status}
                                     </span>
@@ -222,6 +227,12 @@ export default function LeadsPage() {
                                         <span className="text-amber-600">Follow-up: {new Date(lead.follow_up_date).toLocaleDateString()}</span>
                                     </div>
                                 )}
+                                {lead.last_contacted_at && (
+                                    <div className="flex items-center gap-2">
+                                        <Phone size={14} className="text-green-500" />
+                                        <span className="text-green-600">Last Contact: {new Date(lead.last_contacted_at).toLocaleDateString()}</span>
+                                    </div>
+                                )}
                             </div>
 
                             {lead.source && (
@@ -243,6 +254,12 @@ export default function LeadsPage() {
                                 >
                                     <Trash2 size={12} /> Delete
                                 </button>
+                                <Link
+                                    href={`/leads/${lead.id}`}
+                                    className="flex-1 flex items-center justify-center gap-1 py-1.5 text-xs text-blue-600 hover:bg-blue-50 rounded transition"
+                                >
+                                    View →
+                                </Link>
                             </div>
                         </div>
                     ))}
@@ -340,6 +357,27 @@ export default function LeadsPage() {
                                         value={formData.follow_up_date}
                                         onChange={(e) => setFormData({ ...formData, follow_up_date: e.target.value })}
                                     />
+                                </div>
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-4">
+                                <div>
+                                    <label className="text-xs font-medium text-slate-500">Last Contacted</label>
+                                    <input
+                                        type="datetime-local"
+                                        className="w-full border rounded-lg px-3 py-2 mt-1 outline-none focus:border-green-400"
+                                        value={formData.last_contacted_at?.slice(0, 16) || ''}
+                                        onChange={(e) => setFormData({ ...formData, last_contacted_at: e.target.value })}
+                                    />
+                                </div>
+                                <div className="flex items-end">
+                                    <button
+                                        type="button"
+                                        className="w-full py-2 bg-green-100 text-green-700 rounded-lg hover:bg-green-200 transition text-sm"
+                                        onClick={() => setFormData({ ...formData, last_contacted_at: new Date().toISOString() })}
+                                    >
+                                        📞 Mark as Contacted Now
+                                    </button>
                                 </div>
                             </div>
 
